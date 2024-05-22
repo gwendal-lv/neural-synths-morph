@@ -1,14 +1,15 @@
-import yaml
+
 import pathlib
-import librosa
-from ddsp.core import extract_loudness, extract_pitch
-from effortless_config import Config
-import numpy as np
-from tqdm import tqdm
-import numpy as np
 from os import makedirs, path
+
+import numpy as np
 import torch
-from scipy.io import wavfile
+import yaml
+import librosa
+from effortless_config import Config
+from tqdm import tqdm
+
+from ddsp.core import extract_loudness, extract_pitch
 
 
 def get_files(data_location, extension, **kwargs):
@@ -16,7 +17,7 @@ def get_files(data_location, extension, **kwargs):
 
 
 def preprocess(f, sampling_rate, block_size, signal_length, oneshot, **kwargs):
-    x, sr = librosa.load(f, sampling_rate)
+    x, sr = librosa.load(f, sr=sampling_rate)
     N = (signal_length - len(x) % signal_length) % signal_length
     x = np.pad(x, (0, N))
 

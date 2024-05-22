@@ -1,5 +1,5 @@
 data:
-  data_location: /slow-2/georges/dataset-urmp-wav
+  data_location: /media/gwendal/Data/Datasets/Dexed_split/audio_temp
   extension: "wav"
 
 preprocess:
@@ -7,7 +7,7 @@ preprocess:
   signal_length: &signallength 64000
   block_size: &blocksize 160 # must be a power of 2 if using realtime
 
-  oneshot: false # crop every audio file to exactly signal length
+  oneshot: true  # crop every audio file to exactly signal length
   out_dir: ./preprocessed/
 
 model:
