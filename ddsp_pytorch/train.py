@@ -15,10 +15,10 @@ import numpy as np
 
 class args(Config):
     CONFIG = "config.yaml"
-    NAME = "debug"
+    NAME = "ddsp_debug_00"
     ROOT = "runs"
-    STEPS = 500000
-    BATCH = 16
+    STEPS = 125000
+    BATCH = 64
     START_LR = 1e-3
     STOP_LR = 1e-4
     DECAY_OVER = 400000
@@ -46,7 +46,7 @@ mean_loudness, std_loudness = mean_std_loudness(dataloader)
 config["data"]["mean_loudness"] = mean_loudness
 config["data"]["std_loudness"] = std_loudness
 
-writer = SummaryWriter(path.join(args.ROOT, args.NAME), flush_secs=20)
+# writer = SummaryWriter(path.join(args.ROOT, args.NAME), flush_secs=20)  # FIXME
 
 with open(path.join(args.ROOT, args.NAME, "config.yaml"), "w") as out_config:
     yaml.safe_dump(config, out_config)
@@ -76,6 +76,8 @@ for e in tqdm(range(epochs)):
 
         l = (l - mean_loudness) / std_loudness
 
+        # TODO send MFCCs to the DDSP model? The original repo seems to work for a single instrument only
+        #      (no MFCC / z input ; only pitch and loudness)
         y = model(p, l).squeeze(-1)
 
         ori_stft = multiscale_fft(
@@ -99,7 +101,9 @@ for e in tqdm(range(epochs)):
         loss.backward()
         opt.step()
 
-        writer.add_scalar("loss", loss.item(), step)
+        # FIXME
+        #writer.add_scalar("loss", loss.item(), step)
+        print(f"loss: {loss.item()}")
 
         step += 1
 
@@ -107,9 +111,10 @@ for e in tqdm(range(epochs)):
         mean_loss += (loss.item() - mean_loss) / n_element
 
     if not e % 10:
-        writer.add_scalar("lr", schedule(e), e)
-        writer.add_scalar("reverb_decay", model.reverb.decay.item(), e)
-        writer.add_scalar("reverb_wet", model.reverb.wet.item(), e)
+        # FIXME
+        # writer.add_scalar("lr", schedule(e), e)
+        # writer.add_scalar("reverb_decay", model.reverb.decay.item(), e)
+        # writer.add_scalar("reverb_wet", model.reverb.wet.item(), e)
         # scheduler.step()
         if mean_loss < best_loss:
             best_loss = mean_loss
