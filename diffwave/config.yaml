@@ -1,0 +1,41 @@
+dataset:
+  train_path: "/media/gwendal/Data/Datasets/Dexed_split/diffwave_train/"
+  valid_path: "/media/gwendal/Data/Datasets/Dexed_split/diffwave_valid/"
+  test_path: "/media/gwendal/Data/Datasets/Dexed_split/diffwave_test/"
+  metadata: "examples.json"
+  audio: "audio/"
+  pitch: "pitch/"
+  loudness: "loudness/"
+
+common:
+  sampling_rate: 16000
+  block_size: 160  # 10ms frames  //  400 frames total. Original DDSP uses 4ms frames (1000 frames total)
+  duration_secs: 4
+
+model:
+  synth_mode: "harmonic"  # harmonic or wavetable
+  n_mfcc: 30
+  hidden_size: 512
+  n_harmonic: 100
+  n_bands: 65
+  n_wavetables: 10
+  device: "cuda:0"
+
+train:
+  batch_size: 64
+  scales: [4096, 2048, 1024, 512, 256, 128]
+  overlap: .75
+  start_lr: 0.001
+  stop_lr: 0.0001
+  decay_over: 400000
+  epochs: 200
+
+test:
+  batch_size: 2
+  scales: [4096, 2048, 1024, 512, 256, 128]
+  overlap: .75
+
+crepe:
+  model: "large"
+
+visualize: false

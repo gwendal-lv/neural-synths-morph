@@ -1,0 +1,159 @@
+"""
+Diff-WTS model. Main adapted from https://github.com/acids-ircam/ddsp_pytorch.
+"""
+
+import torch
+import torch.nn as nn
+from torchvision.transforms import Resize
+
+from core import harmonic_synth
+from core import mlp, gru, scale_magnitudes, remove_above_nyquist, upsample
+from core import amp_to_impulse_response, fft_convolve
+from wavetable_synth import WavetableSynth
+
+
+class Reverb(nn.Module):
+    def __init__(self, length, sampling_rate, initial_wet=0, initial_decay=5):
+        super().__init__()
+        self.length = length
+        self.sampling_rate = sampling_rate
+
+        self.noise = nn.Parameter((torch.rand(length) * 2 - 1).unsqueeze(-1))
+        self.decay = nn.Parameter(torch.tensor(float(initial_decay)))
+        self.wet = nn.Parameter(torch.tensor(float(initial_wet)))
+
+        t = torch.arange(self.length) / self.sampling_rate
+        t = t.reshape(1, -1, 1)
+        self.register_buffer("t", t)
+
+    def build_impulse(self):
+        t = torch.exp(-nn.functional.softplus(-self.decay) * self.t * 500)
+        noise = self.noise * t
+        impulse = noise * torch.sigmoid(self.wet)
+        impulse[:, 0] = 1
+        return impulse
+
+    def forward(self, x):
+        lenx = x.shape[1]
+        impulse = self.build_impulse()
+        impulse = nn.functional.pad(impulse, (0, 0, 0, lenx - self.length))
+
+        x = fft_convolve(x.squeeze(-1), impulse.squeeze(-1)).unsqueeze(-1)
+
+        return x
+
+
+class WTS(nn.Module):
+    def __init__(self, hidden_size, n_harmonic, n_bands, sampling_rate,
+                 block_size, n_wavetables, mode="wavetable", duration_secs=3,
+                 n_mfcc=30, use_reverb=False):
+        super().__init__()
+        self.hidden_size, self.mode, self.duration_secs, self.n_mfcc = hidden_size, mode, duration_secs, n_mfcc
+        assert self.mode in ["harmonic", "wavetable"]
+        # Parameters that can be saved and restored, but not trained
+        #    Will be moved to the GPU
+        self.register_buffer("sampling_rate", torch.tensor(sampling_rate))
+        self.register_buffer("block_size", torch.tensor(block_size))
+
+
+        # Original DDSP: "normalization layer with learnable shift and scale parameters"
+        self.layer_norm = nn.LayerNorm(self.n_mfcc)
+        self.gru_mfcc = nn.GRU(self.n_mfcc, self.hidden_size, batch_first=True)
+        self.mlp_mfcc = nn.Linear(self.hidden_size, 16)  # 16 (latent variables per frame) = size of a z(t)
+
+        self.decoder_in_mlps = nn.ModuleList([mlp(1, self.hidden_size, 3),
+                                              mlp(1, self.hidden_size, 3),
+                                              mlp(16, self.hidden_size, 3)])
+        self.decoder_gru = gru(3, self.hidden_size)  # TODO use raw GRU... not that method
+        self.out_mlp = mlp(self.hidden_size * 4, self.hidden_size, 3)  # 4 tokens after the skip-connection
+
+        self.loudness_mlp = nn.Sequential(
+            nn.Linear(1, 1),
+            nn.Sigmoid()
+        )  # TODO why another MLP ???? only for wavetable? Uses SIGMOID THEN a softmax (in the wavetable) just ofter that...
+
+        self.harmonic_projection = nn.Linear(hidden_size, n_harmonic + 1)
+        self.noise_projection = nn.Linear(hidden_size, n_bands)
+
+        self.reverb = Reverb(sampling_rate, sampling_rate) if use_reverb else None
+        self.wts = WavetableSynth(n_wavetables=n_wavetables, 
+                                  sr=sampling_rate, 
+                                  duration_secs=duration_secs,
+                                  block_size=block_size)
+
+        self.register_buffer("cache_gru", torch.zeros(1, 1, hidden_size))
+        self.register_buffer("phase", torch.zeros(1))
+
+
+    def forward(self, mfcc, pitch, loudness):  # TODO enable synthesis from Z if provided directly
+        # - - - Encode mfcc first - - -
+        mfcc = torch.transpose(mfcc, 1, 2)
+        # Shape after transpose: N x L_MFCC x n_MFCC
+        #     where L_MFCC is the number of MFCC frames != L_frames (number of audio frames (tokens))
+        # use layer norm instead of trainable norm, not much difference found
+        mfcc = self.layer_norm(mfcc)  # TODO use train dataset's stats
+        Z = self.gru_mfcc(mfcc)[0]  # output [1] would be the last hidden state for each GRU layer - we discard it
+        Z = self.mlp_mfcc(Z)  # After this: Z shape is N x L_MFCC x 16
+        # use image resize to align dimensions, ddsp also do this... TODO CHECK this...
+        # FIXME use a variable factor for resize ; 100 only works with the default config 16kHz block 160
+        Z = Resize(size=(self.duration_secs * 100, 16))(Z)  # After this: Z shape is N x L_frames x 16
+
+        # - - - Decoder - - -
+        pitch_hidden = self.decoder_in_mlps[0](pitch)
+        loudness_hidden = self.decoder_in_mlps[1](loudness)
+        Z_decoder_hidden = self.decoder_in_mlps[2](Z)
+        decoder_hidden = torch.cat([pitch_hidden, loudness_hidden, Z_decoder_hidden], -1)
+        # Why bypass the GRU? Skip-connection? DDSP paper indicate a skip-co from F0, then page 16:
+        # "we concatenate the GRU outputs with outputs of f(t) and l(t) MLPs (in the channel dimension)";
+        #     not Z's MLP output
+        #     Concat in channel dim: tokens' size increases (4 times hidden dim)
+        decoder_gru_outputs = self.decoder_gru(decoder_hidden)[0]  # Shape N x L_frames x hidden_size
+        decoder_hidden = torch.cat([decoder_gru_outputs, decoder_hidden], -1) # Shape N x L_frames x 4*hidden_size
+        decoder_hidden = self.out_mlp(decoder_hidden) # Shape N x L_frames x hidden_size
+
+        # harmonic part (also used to compute wavetable's components amplitudes, although not truly 'harmonic')
+        harm_param = self.harmonic_projection(decoder_hidden)
+        # TODO why aren't wavetable magnitudes scaled? if not activated, they can become negative...
+        if self.mode != "wavetable":
+            harm_param = scale_magnitudes(harm_param)
+
+        total_amp = harm_param[..., :1]
+        amplitudes = harm_param[..., 1:]
+        # "Removes" higher harmonics for high pitches;
+        #    still a 0.0001 factor for aliased components... for consistent backprop?
+        amplitudes = remove_above_nyquist(amplitudes, pitch, self.sampling_rate)
+        amplitudes /= amplitudes.sum(-1, keepdim=True)
+        amplitudes *= total_amp
+
+        total_amp_2 = self.loudness_mlp(loudness)  # TODO WHY ???
+
+        amplitudes = upsample(amplitudes, self.block_size)  # upsample to audio rate
+        pitch = upsample(pitch, self.block_size)
+        total_amp = upsample(total_amp, self.block_size)    # (original comment) TODO: wts can't backprop when using this total_amp, not sure why
+        total_amp_2 = upsample(total_amp_2, self.block_size)    # use this instead for wavetable
+
+        if self.mode == "wavetable":  # diff-wave-synth synthesizer
+            harmonic = self.wts(pitch, total_amp_2)  # TODO chec total_amp values (not activated...)
+        elif self.mode == "harmonic":  # ddsp synthesizer
+            harmonic = harmonic_synth(pitch, amplitudes, self.sampling_rate)
+        else:
+            raise ValueError(self.mode)
+
+        # noise part
+        noise_param = scale_magnitudes(self.noise_projection(decoder_hidden) - 5)
+
+        impulse = amp_to_impulse_response(noise_param, self.block_size)
+        noise = torch.rand(
+            impulse.shape[0],
+            impulse.shape[1],
+            self.block_size,
+        ).to(impulse) * 2 - 1
+
+        noise = fft_convolve(noise, impulse).contiguous()
+        noise = noise.reshape(noise.shape[0], -1, 1)
+
+        # Sum signals and add optional reverb
+        signal = harmonic + noise
+        if self.reverb is not None:
+            signal = self.reverb(signal)
+        return signal

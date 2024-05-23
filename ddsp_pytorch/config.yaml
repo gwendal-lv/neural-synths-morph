@@ -1,5 +1,5 @@
 data:
-  data_location: /media/gwendal/Data/Datasets/Dexed_split/audio_temp
+  data_location: /media/gwendal/Data/Datasets/Dexed_split/diffwave_train/audio
   extension: "wav"
 
 preprocess:
