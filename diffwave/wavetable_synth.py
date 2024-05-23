@@ -12,33 +12,44 @@ from core import upsample
 import random
 
 
-def wavetable_osc(wavetable, freq, sr):
+def wavetable_osc(wavetable, freqs, sr):
     """
     General wavetable synthesis oscillator.
+
+    :param freqs: F0s extracted using CREPE on time frames, upsampled at sr
     """
-    freq = freq.squeeze()
-    increment = freq / sr * wavetable.shape[0]
+    # Wavetable indexes computation: does not need to be differentiable (freqs estimation was not)
+    freqs = freqs.squeeze()  # Shape N_minibatch x L_audio
+    L_wt = wavetable.shape[0]  # Length of the waveform
+    increment = (L_wt / sr) * freqs
     index = torch.cumsum(increment, dim=1) - increment[0]
-    index = index % wavetable.shape[0]
+    # Issue with a simple modulo here: index seems to get so close to 512 that floor returns 512.0
+    #    Then index_low becomes 512 and indexing the wavetable crashes
+    index = torch.remainder(index, L_wt)  # index % L_wt
+    # So: use an eps ; if too close to the max, force the index to 0. Cannot be done later, because we need a proper
+    #     index value in order to compute the alpha
+    index[((L_wt - index) < 1e-5)] = 0.0
 
     # uses linear interpolation implementation
-    index_low = torch.floor(index.clone())
-    index_high = torch.ceil(index.clone())
+    index_low, index_high = torch.floor(index.clone()), torch.ceil(index.clone())  # TODO why clone?
     alpha = index - index_low
-    index_low = index_low.long()
-    index_high = index_high.long()
+    index_low, index_high = index_low.long(), index_high.long()
 
     # FIXME error in the original implementation:
     #     operator(): block: [2875,0,0], thread: [0,0,0]
     #     Assertion `index >= -sizes[i] && index < sizes[i] && "index out of bounds"` failed.
     # Pour débugguer: faire check manual avant que CUDA ne crashe...
     #   TODO remove these checks after debug
-    assert index_low.shape == index_high.shape
-    assert np.all(0 <= index_low.detach().cpu().numpy())
-    assert np.all(index_low.detach().cpu().numpy() <= wavetable.shape[0])
-    assert np.all(0 <= index_high.detach().cpu().numpy())
-    assert np.all(index_high.detach().cpu().numpy() <= wavetable.shape[0])
-    output = wavetable[index_low] + alpha * (wavetable[index_high % wavetable.shape[0]] - wavetable[index_low])
+    with torch.no_grad():
+        assert index_low.shape == index_high.shape
+        assert np.all(0 <= index_low.detach().cpu().numpy())
+        assert np.all(index_low.detach().cpu().numpy() < L_wt)  # FIXME INDEX_LOW reaches 512....
+        assert np.all(0 <= index_high.detach().cpu().numpy())
+        assert np.all(index_high.detach().cpu().numpy() <= L_wt)
+        assert np.all(np.abs((index_high - index_low).detach().cpu().numpy()) <= 1)
+    # The modulo in index_high ensures that the interpolation also works when going back to the wave's start sample
+    index_high = index_high % L_wt
+    output = wavetable[index_low] + alpha * (wavetable[index_high] - wavetable[index_low])
         
     return output
 
@@ -67,7 +78,8 @@ class WavetableSynth(nn.Module):
 
         :param wavetables:
         :param n_wavetables:
-        :param wavetable_len:  Default 512 (diffwave ICASSP22 paper) OK for the lowest 20Hz F0 at 16kHz
+        :param wavetable_len:  Default 512. diffwave ICASSP22 paper says OK for the lowest 20Hz F0 at 16kHz; but
+                                sampling the fundamental wave at 1/sr corresponds to 16kHz / 512 = 31.25Hz
         :param sr:
         :param duration_secs:
         :param block_size:
@@ -87,24 +99,26 @@ class WavetableSynth(nn.Module):
                 #     "We found phase-locking wavetables to start and end at 0 deteriorated performance."
                 #     in contrast to DDSP, locks harmonic components at 0 phase.
                 #     BUT: FIXME why a random phase for the first constant harmonics???
+                # The strange concat from original repo definitely breaks periodicity;
+                #     notch in output waveform (supposedly sinusoidal) is even visible
                 if idx == 0:
-                    wt.data = generate_wavetable(wavetable_len, np.sin, cycle=1, phase=random.uniform(0, 1))
-                    wt.data = torch.cat([wt[:-1], wt[0].unsqueeze(-1)], dim=-1)
+                    wt.data = generate_wavetable(wavetable_len, np.sin, cycle=1)  # , phase=random.uniform(0, 1))
+                    #wt.data = torch.cat([wt[:-1], wt[0].unsqueeze(-1)], dim=-1)  # TODO why??? breaks periodicity
                     wt.requires_grad = False
                 elif idx == 1:
-                    wt.data = generate_wavetable(wavetable_len, np.sin, cycle=2, phase=random.uniform(0, 1))
-                    wt.data = torch.cat([wt[:-1], wt[0].unsqueeze(-1)], dim=-1)
+                    wt.data = generate_wavetable(wavetable_len, np.sin, cycle=2)  # , phase=random.uniform(0, 1))
+                    #wt.data = torch.cat([wt[:-1], wt[0].unsqueeze(-1)], dim=-1)
                     wt.requires_grad = False
                 elif idx == 2:
-                    wt.data = generate_wavetable(wavetable_len, np.sin, cycle=3, phase=random.uniform(0, 1))
-                    wt.data = torch.cat([wt[:-1], wt[0].unsqueeze(-1)], dim=-1)
+                    wt.data = generate_wavetable(wavetable_len, np.sin, cycle=3)  # , phase=random.uniform(0, 1))
+                    #wt.data = torch.cat([wt[:-1], wt[0].unsqueeze(-1)], dim=-1)
                     wt.requires_grad = False
                 elif idx == 3:
-                    wt.data = generate_wavetable(wavetable_len, np.sin, cycle=4, phase=random.uniform(0, 1))
-                    wt.data = torch.cat([wt[:-1], wt[0].unsqueeze(-1)], dim=-1)
+                    wt.data = generate_wavetable(wavetable_len, np.sin, cycle=4)  # , phase=random.uniform(0, 1))
+                    #wt.data = torch.cat([wt[:-1], wt[0].unsqueeze(-1)], dim=-1)
                     wt.requires_grad = False
                 else:
-                    wt.data = torch.cat([wt[:-1], wt[0].unsqueeze(-1)], dim=-1)
+                    #wt.data = torch.cat([wt[:-1], wt[0].unsqueeze(-1)], dim=-1)  # TODO why here also???
                     wt.requires_grad = True
             
             self.attention = nn.Parameter(torch.randn(n_wavetables, 100 * duration_secs))
@@ -122,6 +136,7 @@ class WavetableSynth(nn.Module):
         for wt_idx in range(len(self.wavetables)):
             wt = self.wavetables[wt_idx]
             if wt_idx not in [0, 1, 2, 3]:
+                # FIXME does compression!!! in the original paper, some wavetable have amplitudes > 1
                 wt = nn.Tanh()(wt)  # ensure wavetable range is between [-1, 1]  TODO why now?
             waveform = wavetable_osc(wt, pitch, self.sr)
             output_waveform_lst.append(waveform)

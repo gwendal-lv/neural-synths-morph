@@ -48,8 +48,8 @@ class WTS(nn.Module):
                  block_size, n_wavetables, mode="wavetable", duration_secs=3,
                  n_mfcc=30, use_reverb=False):
         super().__init__()
-        self.hidden_size, self.mode, self.duration_secs, self.n_mfcc = hidden_size, mode, duration_secs, n_mfcc
-        assert self.mode in ["harmonic", "wavetable"]
+        self.hidden_size, self.synth_mode, self.duration_secs, self.n_mfcc = hidden_size, mode, duration_secs, n_mfcc
+        assert self.synth_mode in ["harmonic", "wavetable"]
         # Parameters that can be saved and restored, but not trained
         #    Will be moved to the GPU
         self.register_buffer("sampling_rate", torch.tensor(sampling_rate))
@@ -76,10 +76,14 @@ class WTS(nn.Module):
         self.noise_projection = nn.Linear(hidden_size, n_bands)
 
         self.reverb = Reverb(sampling_rate, sampling_rate) if use_reverb else None
-        self.wts = WavetableSynth(n_wavetables=n_wavetables, 
-                                  sr=sampling_rate, 
-                                  duration_secs=duration_secs,
-                                  block_size=block_size)
+        if self.synth_mode == "wavetable":
+            self.wts = WavetableSynth(
+                n_wavetables=n_wavetables, sr=sampling_rate, duration_secs=duration_secs, block_size=block_size)
+        elif self.synth_mode == "harmonic":
+            self.wts = None
+        else:
+            raise ValueError(self.synth_mode)
+
 
         self.register_buffer("cache_gru", torch.zeros(1, 1, hidden_size))
         self.register_buffer("phase", torch.zeros(1))
@@ -94,7 +98,7 @@ class WTS(nn.Module):
         mfcc = self.layer_norm(mfcc)  # TODO use train dataset's stats
         Z = self.gru_mfcc(mfcc)[0]  # output [1] would be the last hidden state for each GRU layer - we discard it
         Z = self.mlp_mfcc(Z)  # After this: Z shape is N x L_MFCC x 16
-        # use image resize to align dimensions, ddsp also do this... TODO CHECK this...
+        # use image resize to align dimensions, ddsp also do this... TODO CHECK this: seems OK but can't find the source
         # FIXME use a variable factor for resize ; 100 only works with the default config 16kHz block 160
         Z = Resize(size=(self.duration_secs * 100, 16))(Z)  # After this: Z shape is N x L_frames x 16
 
@@ -114,13 +118,14 @@ class WTS(nn.Module):
         # harmonic part (also used to compute wavetable's components amplitudes, although not truly 'harmonic')
         harm_param = self.harmonic_projection(decoder_hidden)
         # TODO why aren't wavetable magnitudes scaled? if not activated, they can become negative...
-        if self.mode != "wavetable":
+        if self.synth_mode != "wavetable":
             harm_param = scale_magnitudes(harm_param)
 
         total_amp = harm_param[..., :1]
         amplitudes = harm_param[..., 1:]
         # "Removes" higher harmonics for high pitches;
         #    still a 0.0001 factor for aliased components... for consistent backprop?
+        # TODO this won't prevent aliasing for wavetable synthesis... (only for the first forced-harmonic waves)
         amplitudes = remove_above_nyquist(amplitudes, pitch, self.sampling_rate)
         amplitudes /= amplitudes.sum(-1, keepdim=True)
         amplitudes *= total_amp
@@ -132,12 +137,10 @@ class WTS(nn.Module):
         total_amp = upsample(total_amp, self.block_size)    # (original comment) TODO: wts can't backprop when using this total_amp, not sure why
         total_amp_2 = upsample(total_amp_2, self.block_size)    # use this instead for wavetable
 
-        if self.mode == "wavetable":  # diff-wave-synth synthesizer
+        if self.synth_mode == "wavetable":  # diff-wave-synth synthesizer
             harmonic = self.wts(pitch, total_amp_2)  # TODO chec total_amp values (not activated...)
-        elif self.mode == "harmonic":  # ddsp synthesizer
+        elif self.synth_mode == "harmonic":  # ddsp synthesizer
             harmonic = harmonic_synth(pitch, amplitudes, self.sampling_rate)
-        else:
-            raise ValueError(self.mode)
 
         # noise part
         noise_param = scale_magnitudes(self.noise_projection(decoder_hidden) - 5)

@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import torch
 
 import yaml
-from nnAudio import Spectrogram
+import nnAudio.features.mel
 from tqdm import tqdm
 
 from core import multiscale_fft, get_scheduler, safe_log
@@ -22,54 +22,39 @@ from model import WTS
 with open("config.yaml", 'r') as stream:
     config = yaml.safe_load(stream)
 
+# TODO use config_comet.yaml ; if available, use comet logging from tensorboardX
+
 # general parameters
 device = config['model']['device']
 sr = config["common"]["sampling_rate"]
-block_size = config["common"]["block_size"]
 duration_secs = config["common"]["duration_secs"]
 batch_size = config["train"]["batch_size"]
 scales = config["train"]["scales"]
 overlap = config["train"]["overlap"]
-train_lr = config["train"]["start_lr"]
 epochs = config["train"]["epochs"]
 
-print(f"""
-======================
-synth_mode: {config["model"]["synth_mode"]}
-======================
-sr: {sr}
-block_size: {block_size}
-duration_secs: {duration_secs}
-batch_size: {batch_size}
-scales: {scales}
-overlap: {overlap}
-hidden_size: {config["model"]["hidden_size"]}
-n_harmonic: {config["model"]["n_harmonic"]}
-n_bands: {config["model"]["n_bands"]}
-n_wavetables: {config["model"]["n_wavetables"]}
-n_mfcc: {config["model"]["n_mfcc"]}
-train_lr: {train_lr}
-======================
-""")
+assert config['train']['loss'] in ['lin', 'lin+log']
+add_log_loss = (config['train']['loss']  == 'lin+log')
+
 
 model = WTS(
     hidden_size=config["model"]["hidden_size"], n_harmonic=config["model"]["n_harmonic"],
-    n_bands=config["model"]["n_bands"], sampling_rate=sr,
-    block_size=block_size, n_wavetables=config["model"]["n_wavetables"], mode=config["model"]["synth_mode"],
+    n_bands=config["model"]["n_bands"], sampling_rate=sr, block_size=config["common"]["block_size"],
+    n_wavetables=config["model"]["n_wavetables"], mode=config["model"]["synth_mode"],
     duration_secs=duration_secs, n_mfcc=config["model"]["n_mfcc"]
 )
 model.to(device)
-opt = torch.optim.Adam(model.parameters(), lr=train_lr)
-spec = Spectrogram.MFCC(sr=sr, n_mfcc=config["model"]["n_mfcc"])
+opt = torch.optim.Adam(model.parameters(), lr=config["train"]["start_lr"])
+spec = nnAudio.features.mel.MFCC(sr=sr, n_mfcc=config["model"]["n_mfcc"])
 
 # both values are pre-computed from the train set 
-mean_loudness, std_loudness = -39.74668743704927, 54.19612404969509  # FIXME load from dataset's statistics
+mean_loudness, std_loudness = -39.74668743704927, 54.19612404969509  # NSynth FIXME load from dataset's statistics
 
 # TODO full batches only? maybe not required if batch norm is not used (seems to be layer norm only)
 train_dl = get_data_loader(config, mode="train", batch_size=batch_size)
 valid_dl = get_data_loader(config, mode="valid", batch_size=batch_size)  # TODO use this...
 
-# for now the scheduler is not used
+# FIXME for now the scheduler is not used
 schedule = get_scheduler(
     len(train_dl),
     config["train"]["start_lr"],
@@ -106,21 +91,37 @@ for epoch in tqdm(range(1, epochs + 1)):
         for s_x, s_y in zip(ori_stft, rec_stft):
             lin_loss = (s_x - s_y).abs().mean()
             loss += lin_loss
-            # TODO OPTIONAL LOG LOSS
-            log_loss = (safe_log(s_x) - safe_log(s_y)).abs().mean()
-            loss += log_loss
+            if add_log_loss:
+                log_loss = (safe_log(s_x) - safe_log(s_y)).abs().mean()
+                loss += log_loss
         
         opt.zero_grad()
         loss.backward()
         opt.step()
 
+        # TODO scheduler step
+
         # TODO log this into comet? or maybe just discard summary writer.... ?
         #train_summary_writer.add_scalar('loss', loss.item(), global_step=idx)
         if step_index % 10 == 0:
-            print(f"loss = {loss}")
+            with torch.no_grad():
+                print(f"loss = {loss}")
+
+                # Analyse rapide des wavetables
+                if model.synth_mode == 'wavetable':
+                    wavetables = [wt.clone().detach() for wt in model.wts.wavetables]
+                    wavetable_stats = [
+                        {'min': wt.min().item(), 'rms': -1.0, 'max': wt.max().item()}  # TODO RMS
+                        for wt in wavetables
+                    ]
+                    # TODO proper logging... AND remember that a tanh is applied to learned WTs
+                    for i, stats in enumerate(wavetable_stats):
+                        stats = {k: f"{v:.3f}" for k, v in stats.items()}
+                        print(f"Wavetable #{i} stats: {stats}")
+
         if step_index % 500 == 0:
             torch.save(model.state_dict(), "model.pt")
         
-        step_index += 1  # TODO rename step idx
+        step_index += 1
 
     # TODO implement some kind of eval...
