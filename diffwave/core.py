@@ -166,7 +166,7 @@ def mlp(in_size, hidden_size, n_layers):
     for i in range(n_layers):
         net.append(nn.Linear(channels[i], channels[i + 1]))
         net.append(nn.LayerNorm(channels[i + 1]))
-        net.append(nn.LeakyReLU())  # TODO explain: base DDSP implementation uses vanilla ReLU
+        net.append(nn.LeakyReLU())  # TODO explain (default slope 0.01); base DDSP implementation uses vanilla ReLU
     return nn.Sequential(*net)
 
 
@@ -177,7 +177,7 @@ def gru(n_input, hidden_size):
 def harmonic_synth(pitch, amplitudes, sampling_rate):
     n_harmonic = amplitudes.shape[-1]
     omega = torch.cumsum(2 * math.pi * pitch / sampling_rate, 1)
-    omegas = omega * torch.arange(1, n_harmonic + 1).to(omega)  # FIXME no modulo ; possible instability?
+    omegas = omega * torch.arange(1, n_harmonic + 1).to(omega)
 
     signal = (torch.sin(omegas) * amplitudes).sum(-1, keepdim=True)
     return signal
@@ -210,14 +210,3 @@ def fft_convolve(signal, kernel):
 
     return output
 
-
-def get_scheduler(len_dataset, start_lr, stop_lr, length):
-    def schedule(epoch):
-        step = epoch * len_dataset
-        if step < length:
-            t = step / length
-            return start_lr * (1 - t) + stop_lr * t
-        else:
-            return stop_lr
-
-    return schedule

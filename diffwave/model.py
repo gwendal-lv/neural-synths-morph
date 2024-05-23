@@ -6,9 +6,12 @@ import torch
 import torch.nn as nn
 from torchvision.transforms import Resize
 
+import nnAudio.features.mel
+
 from core import harmonic_synth
 from core import mlp, gru, scale_magnitudes, remove_above_nyquist, upsample
 from core import amp_to_impulse_response, fft_convolve
+from diffwave.core import multiscale_fft, safe_log
 from wavetable_synth import WavetableSynth
 
 
@@ -43,7 +46,7 @@ class Reverb(nn.Module):
         return x
 
 
-class WTS(nn.Module):
+class DDSP_WTS(nn.Module):
     def __init__(self, hidden_size, n_harmonic, n_bands, sampling_rate,
                  block_size, n_wavetables, mode="wavetable", duration_secs=3,
                  n_mfcc=30, use_reverb=False):
@@ -55,6 +58,10 @@ class WTS(nn.Module):
         self.register_buffer("sampling_rate", torch.tensor(sampling_rate))
         self.register_buffer("block_size", torch.tensor(block_size))
 
+        # Pre-processing
+        # both values are pre-computed from the train set
+        self.mean_loudness, self.std_loudness = -39.74668743704927, 54.19612404969509  # NSynth FIXME load from dataset's statistics
+        self.compute_MFCC = nnAudio.features.mel.MFCC(sr=sampling_rate, n_mfcc=n_mfcc)
 
         # Original DDSP: "normalization layer with learnable shift and scale parameters"
         self.layer_norm = nn.LayerNorm(self.n_mfcc)
@@ -84,12 +91,14 @@ class WTS(nn.Module):
         else:
             raise ValueError(self.synth_mode)
 
-
         self.register_buffer("cache_gru", torch.zeros(1, 1, hidden_size))
         self.register_buffer("phase", torch.zeros(1))
 
 
     def forward(self, mfcc, pitch, loudness):  # TODO enable synthesis from Z if provided directly
+        loudness = (loudness - self.mean_loudness) / self.std_loudness
+        pitch, loudness = pitch.unsqueeze(-1).float(), loudness.unsqueeze(-1).float()
+
         # - - - Encode mfcc first - - -
         mfcc = torch.transpose(mfcc, 1, 2)
         # Shape after transpose: N x L_MFCC x n_MFCC
@@ -159,4 +168,17 @@ class WTS(nn.Module):
         signal = harmonic + noise
         if self.reverb is not None:
             signal = self.reverb(signal)
-        return signal
+        return signal, Z
+
+
+def MSS_loss(audio_output, audio_target, scales, overlap, add_log_loss):
+    ori_stft = multiscale_fft(audio_target.squeeze(), scales, overlap)
+    rec_stft = multiscale_fft(audio_output.squeeze(), scales, overlap)
+    loss = 0
+    for s_x, s_y in zip(ori_stft, rec_stft):
+        lin_loss = (s_x - s_y).abs().mean()
+        loss += lin_loss
+        if add_log_loss:
+            log_loss = (safe_log(s_x) - safe_log(s_y)).abs().mean()
+            loss += log_loss
+    return loss

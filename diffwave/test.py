@@ -7,7 +7,7 @@ import torch
 import yaml 
 from dataloader import get_data_loader
 from tqdm import tqdm
-from model import WTS
+from model import DDSP_WTS
 from nnAudio import Spectrogram
 import soundfile as sf
 import matplotlib.pyplot as plt
@@ -23,9 +23,9 @@ batch_size = config["train"]["batch_size"]
 scales = config["test"]["scales"]
 overlap = config["test"]["overlap"]
 
-model = WTS(hidden_size=512, n_harmonic=100, n_bands=65, sampling_rate=sr,
-            block_size=block_size, n_wavetables=10, mode="wavetable", 
-            duration_secs=duration_secs)
+model = DDSP_WTS(hidden_size=512, n_harmonic=100, n_bands=65, sampling_rate=sr,
+                 block_size=block_size, n_wavetables=10, mode="wavetable",
+                 duration_secs=duration_secs)
 model.cuda()
 model.load_state_dict(torch.load("model.pt"))
 spec = Spectrogram.MFCC(sr=sr, n_mfcc=30)

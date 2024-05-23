@@ -2,7 +2,6 @@ dataset:
   train_path: "/media/gwendal/Data/Datasets/Dexed_split/diffwave_train/"  # TODO full ds : remove diffwave_ prefix
   valid_path: "/media/gwendal/Data/Datasets/Dexed_split/diffwave_valid/"
   test_path: "/media/gwendal/Data/Datasets/Dexed_split/diffwave_test/"
-  metadata: "examples.json"
   audio: "audio/"
   pitch: "pitch/"
   loudness: "loudness/"
@@ -13,7 +12,8 @@ common:
   duration_secs: 4
 
 model:
-  synth_mode: "wavetable"  # harmonic or wavetable
+  name: "debug"
+  synth_mode: "harmonic"  # harmonic or wavetable
   n_mfcc: 30
   hidden_size: 512
   n_harmonic: 100
@@ -22,14 +22,14 @@ model:
   device: "cuda:0"
 
 train:
+  root_logs_dir: "/media/gwendal/Data/Logs/neural-synths-morph"
   batch_size: 64
   scales: [4096, 2048, 1024, 512, 256, 128]
   overlap: .75
-  start_lr: 0.001
-  stop_lr: 0.0001
-  decay_over: 400000
-  epochs: 200
-  loss: 'lin'  # Only linear MSS loss (lin), or linear+logarithmic (lin+log)
+  start_lr: 0.002
+  stop_lr: 0.0002
+  epochs: 200  # TODO wavetable trains much slower
+  loss: 'lin+log'  # Only linear MSS loss (lin), or linear+logarithmic (lin+log)
 
 test:
   batch_size: 2
