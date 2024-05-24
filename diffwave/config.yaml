@@ -13,7 +13,7 @@ common:
 
 model:
   name: "debug"
-  synth_mode: "harmonic"  # harmonic or wavetable
+  synth_mode: "wavetable"  # harmonic or wavetable
   n_mfcc: 30
   hidden_size: 512
   n_harmonic: 100

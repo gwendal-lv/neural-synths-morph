@@ -10,11 +10,12 @@ import torch
 
 import yaml
 from tqdm import tqdm
+from tensorboardX import SummaryWriter
 
 from dataloader import get_data_loader
 from diffwave.model import MSS_loss
 from model import DDSP_WTS
-from tensorboardX import SummaryWriter
+import plots
 
 
 def train_model(config):
@@ -90,20 +91,18 @@ def train_model(config):
         valid_logger.add_scalar(f"MSS{config['train']['loss']}Loss", np.mean(losses), global_step=step_index)
 
         # - - - TODO plots (pas à toutes les epochs) and save the model - - -
-        if epoch % 10 == 0:
+        if epoch % 1 == 0:  # Epoch starts at 1 (not 0)
+            # TODO OOO
             with torch.no_grad():
                 # Analyse rapide des wavetables  TODO plot them into tensorboard
                 if model.synth_mode == 'wavetable':
-                    wavetables = [wt.clone().detach() for wt in model.wts.wavetables]
-                    wavetable_stats = [
-                        {'min': wt.min().item(), 'rms': -1.0, 'max': wt.max().item()}  # TODO RMS
-                        for wt in wavetables
-                    ]
+                    wavetables = np.asarray([wt.clone().detach().cpu().numpy() for wt in model.wts.wavetables])
+                    fig, axes, average_rms, average_max_amplitude = plots.wavetables(wavetables)
                     # TODO proper logging... AND remember that a tanh is applied to learned WTs
-                    for i, stats in enumerate(wavetable_stats):
-                        stats = {k: f"{v:.3f}" for k, v in stats.items()}
-                        print(f"Wavetable #{i} stats: {stats}")
-            torch.save(model.state_dict(), log_dir.joinpath("model.pt"))
+                    train_logger.add_scalar("wt_RMS", average_rms, global_step=step_index)
+                    train_logger.add_scalar("wt_max", average_max_amplitude, global_step=step_index)
+                    train_logger.add_figure("wavetables", fig, close=True, global_step=step_index)
+            torch.save(model.state_dict(), log_dir.joinpath("model.pt"))  # Small models (a few MBs)
 
 
 if __name__ == "__main__":
