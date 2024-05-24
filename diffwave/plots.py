@@ -2,8 +2,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-import torch
-
 
 def wavetables(_wavetables: np.ndarray, n_fixed_waves=4):
     """

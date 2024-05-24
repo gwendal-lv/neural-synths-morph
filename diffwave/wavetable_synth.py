@@ -5,16 +5,16 @@ import torch
 from torch import nn
 import numpy as np
 from utils import *
-from tqdm import tqdm
 import soundfile as sf
 import matplotlib.pyplot as plt
 from core import upsample
-import random
 
 
 def wavetable_osc(wavetable, freqs, sr):
     """
     General wavetable synthesis oscillator.
+    TODO implement antialiasing... ICASSP22 suggest a filter for high f0
+        But: which f0 to use? The median (for each batch item) from freqs? Or require an F0 as an arg?
 
     :param freqs: F0s extracted using CREPE on time frames, upsampled at sr
     """
@@ -31,22 +31,10 @@ def wavetable_osc(wavetable, freqs, sr):
     index[((L_wt - index) < 1e-5)] = 0.0
 
     # uses linear interpolation implementation
-    index_low, index_high = torch.floor(index.clone()), torch.ceil(index.clone())  # TODO why clone?
+    index_low, index_high = torch.floor(index.clone()), torch.ceil(index.clone())  # TODO explain: why clone?
     alpha = index - index_low
     index_low, index_high = index_low.long(), index_high.long()
 
-    # FIXME error in the original implementation:
-    #     operator(): block: [2875,0,0], thread: [0,0,0]
-    #     Assertion `index >= -sizes[i] && index < sizes[i] && "index out of bounds"` failed.
-    # Pour débugguer: faire check manual avant que CUDA ne crashe...
-    #   TODO remove these checks after debug
-    with torch.no_grad():
-        assert index_low.shape == index_high.shape
-        assert np.all(0 <= index_low.detach().cpu().numpy())
-        assert np.all(index_low.detach().cpu().numpy() < L_wt)  # FIXME INDEX_LOW reaches 512....
-        assert np.all(0 <= index_high.detach().cpu().numpy())
-        assert np.all(index_high.detach().cpu().numpy() <= L_wt)
-        assert np.all(np.abs((index_high - index_low).detach().cpu().numpy()) <= 1)
     # The modulo in index_high ensures that the interpolation also works when going back to the wave's start sample
     index_high = index_high % L_wt
     output = wavetable[index_low] + alpha * (wavetable[index_high] - wavetable[index_low])
@@ -67,13 +55,7 @@ def generate_wavetable(length, f, cycle=1, phase=0):
 
 
 class WavetableSynth(nn.Module):
-    def __init__(self,
-                 wavetables=None,
-                 n_wavetables=64,
-                 wavetable_len=512,
-                 sr=16000,
-                 duration_secs=3,
-                 block_size=160):
+    def __init__(self, wavetables=None, n_wavetables=64, wavetable_len=512, sr=16000, duration_secs=3, block_size=160):
         """
 
         :param wavetables:
@@ -85,7 +67,9 @@ class WavetableSynth(nn.Module):
         :param block_size:
         """
         super(WavetableSynth, self).__init__()
-        if wavetables is None: 
+        self.sr, self.block_size = sr, block_size
+
+        if wavetables is None:
             self.wavetables = []
             for _ in range(n_wavetables):
                 cur = nn.Parameter(torch.empty(wavetable_len).normal_(mean=0, std=0.01))
@@ -94,16 +78,19 @@ class WavetableSynth(nn.Module):
             self.wavetables = nn.ParameterList(self.wavetables)
 
             for idx, wt in enumerate(self.wavetables):
+                # TODO use fixed wavetable ONLY IF REQUIRED - default behavior should be end-to-end learning
                 # following the paper, initialize f0-f3 wavetables and disable backprop FIXME not what it says...
                 # Regarding phase: ICASSP22 paper states:
                 #     "We found phase-locking wavetables to start and end at 0 deteriorated performance."
                 #     in contrast to DDSP, locks harmonic components at 0 phase.
                 #     BUT: FIXME why a random phase for the first constant harmonics???
                 # The strange concat from original repo definitely breaks periodicity;
-                #     notch in output waveform (supposedly sinusoidal) is even visible
+                #     a notch in output waveform (supposedly sinusoidal) is even visible.
+                # The ICASSP22 paper indicated to add an extra identical sample at the (length 512 -> 513);
+                #     we handle this by managing the indexing properly, the result is the same.
                 if idx == 0:
                     wt.data = generate_wavetable(wavetable_len, np.sin, cycle=1)  # , phase=random.uniform(0, 1))
-                    #wt.data = torch.cat([wt[:-1], wt[0].unsqueeze(-1)], dim=-1)  # TODO why??? breaks periodicity
+                    #wt.data = torch.cat([wt[:-1], wt[0].unsqueeze(-1)], dim=-1)
                     wt.requires_grad = False
                 elif idx == 1:
                     wt.data = generate_wavetable(wavetable_len, np.sin, cycle=2)  # , phase=random.uniform(0, 1))
@@ -120,64 +107,38 @@ class WavetableSynth(nn.Module):
                 else:
                     #wt.data = torch.cat([wt[:-1], wt[0].unsqueeze(-1)], dim=-1)  # TODO why here also???
                     wt.requires_grad = True
-            
-            self.attention = nn.Parameter(torch.randn(n_wavetables, 100 * duration_secs))
-
         else:
             self.wavetables = wavetables
-            self.attention = nn.Parameter(torch.randn(n_wavetables, 100 * duration_secs))
-        
-        self.sr = sr
-        self.block_size = block_size
-        self.attention_softmax = nn.Softmax(dim=0)
 
-    def forward(self, pitch, amplitude):        
+    def forward(self, pitch, envelope, attention):
+        """
+        Expected inputs' shape: N_minibatch x L_raw_audio x N_wavetables
+
+        :param pitch:
+        :param envelope: A(t) in the ICASSP22 paper
+        :param attention: Time-varying attention weights (already softmaxed and upsampled) for all waveforms.
+                          Corresponds to c_i(t) in the paper.
+        :return:
+        """
         output_waveform_lst = []
+        # This could be improved (parallelized) by using a 2D matrix as wavetables. Not sure if it's worth it...
+        # Generate constant-envelope waveforms from the wavetables
         for wt_idx in range(len(self.wavetables)):
             wt = self.wavetables[wt_idx]
             if wt_idx not in [0, 1, 2, 3]:
                 # FIXME does compression!!! in the original paper, some wavetable have amplitudes > 1
-                wt = nn.Tanh()(wt)  # ensure wavetable range is between [-1, 1]  TODO why now?
+                pass  # wt = nn.Tanh()(wt)  # ensure wavetable range is between [-1, 1]  TODO why now? TRY REMOVE
             waveform = wavetable_osc(wt, pitch, self.sr)
             output_waveform_lst.append(waveform)
-
-        # apply attention TODO explain why attention is not the output of a NN.... only amplitudes ???
-        attention = self.attention_softmax(self.attention)
-        attention_upsample = upsample(attention.unsqueeze(-1), self.block_size).squeeze()
-
-        output_waveform = torch.stack(output_waveform_lst, dim=1)
-        output_waveform = output_waveform * attention_upsample
-        output_waveform_after = torch.sum(output_waveform, dim=1)
-      
-        output_waveform_after = output_waveform_after.unsqueeze(-1)
-        output_waveform_after = output_waveform_after * amplitude
-       
-        return output_waveform_after
+        output_waveform = torch.stack(output_waveform_lst, dim=2)
+        # Then apply the attentions (local envelopes for each waveform)
+        output_waveform = output_waveform * attention  # actually multiple waveforms at this point
+        output_waveform = torch.sum(output_waveform, dim=2, keepdim=True)
+        output_waveform *= envelope
+        return output_waveform
 
 
 if __name__ == "__main__":
-    # create a sine wavetable and to a simple synthesis test
-    wavetable_len = 512
-    sr = 16000
-    duration = 4
-    freq_t = [739.99 for _ in range(sr)] + [523.25 for _ in range(sr)] + [349.23 for _ in range(sr * 2)]
-    freq_t = torch.tensor(freq_t)
-    freq_t = torch.stack([freq_t, freq_t, freq_t], dim=0)
-    sine_wavetable = generate_wavetable(wavetable_len, np.sin)
-    wavetable = torch.tensor([sine_wavetable,])
-    
-    wt_synth = WavetableSynth(wavetables=wavetable, sr=sr, duration_secs=4)
-    amplitude_t = torch.ones(sr * duration,)
-    amplitude_t = torch.stack([amplitude_t, amplitude_t, amplitude_t], dim=0)
-    amplitude_t = amplitude_t.unsqueeze(-1)
-
-    y = wt_synth(freq_t, amplitude_t, duration)
-    print(y.shape, 'y')
-    plt.plot(y.squeeze()[0].detach().numpy())
-    plt.show()
-    sf.write('test_3s_v1.wav', y.squeeze()[0].detach().numpy(), sr, 'PCM_24')
-    sf.write('test_3s_v2.wav', y.squeeze()[1].detach().numpy(), sr, 'PCM_24')
-    sf.write('test_3s_v3.wav', y.squeeze()[2].detach().numpy(), sr, 'PCM_24')
-
+    pass # TODO debug/test anti-aliasing here....
 
 

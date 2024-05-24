@@ -8,12 +8,7 @@ import torch.fft as fft
 import numpy as np
 import librosa as li
 import crepe
-# from torchcrepeV2 import TorchCrepePredictor
 import math
-
-
-# torchcrepeV2 is my own version of crepe in torch, not released yet
-# crepe_predictor = TorchCrepePredictor()
 
 
 def safe_log(x):
@@ -69,9 +64,12 @@ def resample(x, factor: int):
     return y
 
 
-def upsample(signal, factor):
+def upsample(signal, factor, interpolation_mode='nearest'):
     signal = signal.permute(0, 2, 1)
-    signal = nn.functional.interpolate(signal, size=signal.shape[-1] * factor)
+    assert len(signal.shape) == 3, "Required by 'linear' interpolation"
+    # Original implementation https://github.com/acids-ircam/ddsp_pytorch used the 'nearest' default mode
+    #    'linear' seems to impair training... TBC
+    signal = nn.functional.interpolate(signal, size=signal.shape[-1] * factor, mode=interpolation_mode)
     return signal.permute(0, 2, 1)
 
 

@@ -12,13 +12,14 @@ common:
   duration_secs: 4
 
 model:
-  name: "debug"
+  name: "debug_wtAttention"
   synth_mode: "wavetable"  # harmonic or wavetable
   n_mfcc: 30
   hidden_size: 512
   n_harmonic: 100
   n_bands: 65
   n_wavetables: 10
+  upsampling_mode: "nearest"
   device: "cuda:0"
 
 train:
@@ -29,7 +30,7 @@ train:
   start_lr: 0.002
   stop_lr: 0.0002
   epochs: 200  # TODO wavetable trains much slower
-  loss: 'lin+log'  # Only linear MSS loss (lin), or linear+logarithmic (lin+log)
+  loss: 'lin'  # Only linear MSS loss (lin), or linear+logarithmic (lin+log)
 
 test:
   batch_size: 2

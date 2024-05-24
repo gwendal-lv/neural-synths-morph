@@ -10,8 +10,7 @@ import nnAudio.features.mel
 
 from core import harmonic_synth
 from core import mlp, gru, scale_magnitudes, remove_above_nyquist, upsample
-from core import amp_to_impulse_response, fft_convolve
-from diffwave.core import multiscale_fft, safe_log
+from core import amp_to_impulse_response, fft_convolve, multiscale_fft, safe_log
 from wavetable_synth import WavetableSynth
 
 
@@ -49,9 +48,10 @@ class Reverb(nn.Module):
 class DDSP_WTS(nn.Module):
     def __init__(self, hidden_size, n_harmonic, n_bands, sampling_rate,
                  block_size, n_wavetables, mode="wavetable", duration_secs=3,
-                 n_mfcc=30, use_reverb=False):
+                 n_mfcc=30, use_reverb=False, upsampling_mode="nearest"):
         super().__init__()
         self.hidden_size, self.synth_mode, self.duration_secs, self.n_mfcc = hidden_size, mode, duration_secs, n_mfcc
+        self.upsampling_mode = upsampling_mode  # Use to upsample pitches, loudness and partial's amplitudes
         assert self.synth_mode in ["harmonic", "wavetable"]
         # Parameters that can be saved and restored, but not trained
         #    Will be moved to the GPU
@@ -59,8 +59,7 @@ class DDSP_WTS(nn.Module):
         self.register_buffer("block_size", torch.tensor(block_size))
 
         # Pre-processing
-        # both values are pre-computed from the train set
-        self.mean_loudness, self.std_loudness = -39.74668743704927, 54.19612404969509  # NSynth FIXME load from dataset's statistics
+        self.mean_loudness, self.std_loudness = -39.74668743704927, 54.19612404969509  # NSynth train set FIXME load from dataset's statistics
         self.compute_MFCC = nnAudio.features.mel.MFCC(sr=sampling_rate, n_mfcc=n_mfcc)
 
         # Original DDSP: "normalization layer with learnable shift and scale parameters"
@@ -74,22 +73,18 @@ class DDSP_WTS(nn.Module):
         self.decoder_gru = gru(3, self.hidden_size)  # TODO use raw GRU... not that method
         self.out_mlp = mlp(self.hidden_size * 4, self.hidden_size, 3)  # 4 tokens after the skip-connection
 
-        self.loudness_mlp = nn.Sequential(
-            nn.Linear(1, 1),
-            nn.Sigmoid()
-        )  # TODO why another MLP ???? only for wavetable? Uses SIGMOID THEN a softmax (in the wavetable) just ofter that...
-
-        self.harmonic_projection = nn.Linear(hidden_size, n_harmonic + 1)
-        self.noise_projection = nn.Linear(hidden_size, n_bands)
-
-        self.reverb = Reverb(sampling_rate, sampling_rate) if use_reverb else None
-        if self.synth_mode == "wavetable":
+        # Synthesis modules
+        if self.synth_mode == "harmonic":
+            self.partials_projection = nn.Linear(hidden_size, n_harmonic + 1)
+            self.wts = None
+        elif self.synth_mode == "wavetable":
+            self.partials_projection = nn.Linear(hidden_size, n_wavetables + 1)
             self.wts = WavetableSynth(
                 n_wavetables=n_wavetables, sr=sampling_rate, duration_secs=duration_secs, block_size=block_size)
-        elif self.synth_mode == "harmonic":
-            self.wts = None
         else:
             raise ValueError(self.synth_mode)
+        self.noise_projection = nn.Linear(hidden_size, n_bands)
+        self.reverb = Reverb(sampling_rate, sampling_rate) if use_reverb else None
 
         self.register_buffer("cache_gru", torch.zeros(1, 1, hidden_size))
         self.register_buffer("phase", torch.zeros(1))
@@ -116,42 +111,50 @@ class DDSP_WTS(nn.Module):
         loudness_hidden = self.decoder_in_mlps[1](loudness)
         Z_decoder_hidden = self.decoder_in_mlps[2](Z)
         decoder_hidden = torch.cat([pitch_hidden, loudness_hidden, Z_decoder_hidden], -1)
-        # Why bypass the GRU? Skip-connection? DDSP paper indicate a skip-co from F0, then page 16:
+        # Why bypass the GRU? Skip-connection? DDSP paper indicates a skip-co from F0; then, page 16:
         # "we concatenate the GRU outputs with outputs of f(t) and l(t) MLPs (in the channel dimension)";
         #     not Z's MLP output
-        #     Concat in channel dim: tokens' size increases (4 times hidden dim)
+        # Concat in channel dim: tokens' size increases (4 times hidden dim)
         decoder_gru_outputs = self.decoder_gru(decoder_hidden)[0]  # Shape N x L_frames x hidden_size
         decoder_hidden = torch.cat([decoder_gru_outputs, decoder_hidden], -1) # Shape N x L_frames x 4*hidden_size
         decoder_hidden = self.out_mlp(decoder_hidden) # Shape N x L_frames x hidden_size
 
-        # harmonic part (also used to compute wavetable's components amplitudes, although not truly 'harmonic')
-        harm_param = self.harmonic_projection(decoder_hidden)
-        # TODO why aren't wavetable magnitudes scaled? if not activated, they can become negative...
-        if self.synth_mode != "wavetable":
-            harm_param = scale_magnitudes(harm_param)
 
-        total_amp = harm_param[..., :1]
-        amplitudes = harm_param[..., 1:]
-        # "Removes" higher harmonics for high pitches;
-        #    still a 0.0001 factor for aliased components... for consistent backprop?
-        # TODO this won't prevent aliasing for wavetable synthesis... (only for the first forced-harmonic waves)
-        amplitudes = remove_above_nyquist(amplitudes, pitch, self.sampling_rate)
-        amplitudes /= amplitudes.sum(-1, keepdim=True)
-        amplitudes *= total_amp
+        # - - - harmonic/wavetable signal synthesis - - -
+        #   (also used to compute wavetable's components amplitudes, although not truly 'harmonic')
+        #   handled slightly differently for DDSP and DiffWave
+        harm_param = self.partials_projection(decoder_hidden)
+        envelope, amplitudes = harm_param[..., :1], harm_param[..., 1:]
+        if self.synth_mode == "harmonic":  # ddsp synthesizer
+            envelope, amplitudes = scale_magnitudes(envelope), scale_magnitudes(amplitudes)
+            amplitudes /= amplitudes.sum(-1, keepdim=True)  # TODO why this for DDSP??? try remove this...
+            amplitudes *= envelope
+            # "Removes" higher harmonics for high pitches;
+            #    still a 0.0001 factor for aliased components... for consistent backprop?
+            # this can't prevent aliasing for wavetable synthesis... (only for the first fixed harmonic waves)
+            amplitudes = remove_above_nyquist(amplitudes, pitch, self.sampling_rate)
+        elif self.synth_mode == "wavetable":  # diff-wave-synth synthesizer
+            # ICASSP22 paper: "A(n) and ci (n) are constrained positive via a sigmoid."
+            #    but for ci(n): probably shouldn't apply a sigmoid then a softmax....
+            envelope = torch.sigmoid(envelope) + 1e-7  # same as DDSP, for stability
+            # softmax for amplitudes. Amplitudes' shape: N_minibatch x L_frames x N_wavetables
+            amplitudes = torch.softmax(amplitudes, dim=2)
+            # TODO (try) prevent aliasing for WTS!
+        # upsample synthesis parameters to audio rate
+        pitch = upsample(pitch, self.block_size, self.upsampling_mode)
+        envelope = upsample(envelope, self.block_size, self.upsampling_mode)
+        amplitudes = upsample(amplitudes, self.block_size, self.upsampling_mode)
+        # Then generate the harmonic signal  TODO give output shape
+        if self.synth_mode == "harmonic":
+            # Envelope has been applied already
+            harmonic = harmonic_synth(pitch, amplitudes, self.sampling_rate)  # shape N_minibatch x L_raw_audio x 1
+        elif self.synth_mode == "wavetable":
+            harmonic = self.wts(pitch, envelope, amplitudes)  # not truly harmonic...
+        else:
+            raise ValueError(self.synth_mode)
 
-        total_amp_2 = self.loudness_mlp(loudness)  # TODO WHY ???
 
-        amplitudes = upsample(amplitudes, self.block_size)  # upsample to audio rate
-        pitch = upsample(pitch, self.block_size)
-        total_amp = upsample(total_amp, self.block_size)    # (original comment) TODO: wts can't backprop when using this total_amp, not sure why
-        total_amp_2 = upsample(total_amp_2, self.block_size)    # use this instead for wavetable
-
-        if self.synth_mode == "wavetable":  # diff-wave-synth synthesizer
-            harmonic = self.wts(pitch, total_amp_2)  # TODO chec total_amp values (not activated...)
-        elif self.synth_mode == "harmonic":  # ddsp synthesizer
-            harmonic = harmonic_synth(pitch, amplitudes, self.sampling_rate)
-
-        # noise part
+        # - - - noise signal synthesis - - -
         noise_param = scale_magnitudes(self.noise_projection(decoder_hidden) - 5)
 
         impulse = amp_to_impulse_response(noise_param, self.block_size)
@@ -164,7 +167,8 @@ class DDSP_WTS(nn.Module):
         noise = fft_convolve(noise, impulse).contiguous()
         noise = noise.reshape(noise.shape[0], -1, 1)
 
-        # Sum signals and add optional reverb
+
+        # - - - Sum signals and add optional reverb - - -
         signal = harmonic + noise
         if self.reverb is not None:
             signal = self.reverb(signal)
