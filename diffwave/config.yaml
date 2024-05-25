@@ -12,7 +12,7 @@ common:
   duration_secs: 4
 
 model:
-  name: "LPfilt"
+  name: "baseline_4harm_NOfilt"
   synth_mode: "wavetable"  # harmonic or wavetable
   n_mfcc: 30
   hidden_size: 512

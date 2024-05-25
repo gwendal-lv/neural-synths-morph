@@ -10,26 +10,25 @@ from torch import nn
 def wavetable_osc(wavetable_padded, freqs, sr, fir_h=None):
     """
     General wavetable synthesis oscillator.
-    TODO implement antialiasing... ICASSP22 suggest a filter for high f0
-        But: which f0 to use? The median (for each batch item) from freqs? Or require an F0 as an arg?
+    Antialiasing... ICASSP22 suggest a "filter for high f0"
 
-    :param wavetable_padded: TODO indicate shape
+    :param wavetable_padded: Must be reflection- (mirror-) padded if fir_h is given. shape 1 x 1 x L_wavetable
     :param freqs: F0s extracted using CREPE on time frames, upsampled at sr (shape N_minibatch x L_raw_audio x 1)
+    :param fir_h: Very basic antialiasing filter; should properly work for low F0s only.
     :returns output waveforms, shape N_minibatch x L_raw_audio
     """
-    # TODO the only true solution to prevent aliasing would be to integrate aliasing quantification as a
-    #    backproped loss....
-
-    # TODO The filtering is here (not done outside this method) because eventually if should depend on the local f0.
+    # The filtering is here (not done outside this method) because it should eventually depend on the local f0.
     #    Computationally: does not change the cost; filtering is applied once per minibatch for each wave from
     #    the wavetable.
     # (torchaudio.functional.convolve not available yet in our current PyTorch version)
     if fir_h is not None:
         assert len(fir_h.shape) == len(wavetable_padded.shape) == 3, "3D tensors expected for torch conv"
         assert tuple(fir_h.shape[0:2]) == tuple(wavetable_padded.shape[0:2]) == (1, 1)
-        wavetable = torch.nn.functional.conv1d(wavetable_padded, fir_h).squeeze()
+        wavetable = torch.nn.functional.conv1d(wavetable_padded, fir_h).squeeze()  # Won't work for high f0
     else:
         wavetable = wavetable_padded
+    # A true solution to prevent aliasing may be to integrate aliasing quantification as a backproped loss....
+    # Or: generate time-varying filters (much more expensive to apply/compute), cut-off depending on local F0?
 
     # Wavetable indexes computation: does not need to be differentiable (freqs estimation was not)
     freqs = torch.squeeze(freqs, dim=2)  # After squeeze: Shape N_minibatch x L_audio
@@ -67,9 +66,14 @@ def generate_wavetable(length, f, cycle=1, phase=0):
     return torch.tensor(wavetable)
 
 
+def windowed_sinc_low_pass_filter(n_taps, nu_c, window=torch.hamming_window):
+    h = 2 * nu_c * torch.sinc(2 * nu_c * torch.arange(-(n_taps - 1) // 2, 1 + (n_taps - 1) // 2))
+    return h * window(n_taps, periodic=False)
+
+
 class WavetableSynth(nn.Module):
     def __init__(self, wavetables=None, n_wavetables=10, n_pure_harmonics=0, wavetable_len=512, sr=16000,
-                 lowpass_fir_taps=31, lowpass_fir_nu_c=0.1):
+                 lowpass_fir_taps=0, lowpass_fir_nu_c=0.1):
         """
 
         :param wavetables:
@@ -77,6 +81,7 @@ class WavetableSynth(nn.Module):
         :param wavetable_len:  Default 512. diffwave ICASSP22 paper says OK for the lowest 20Hz F0 at 16kHz;
                                 sampling the fundamental wave at 1/sr corresponds to 16kHz / 512 = 31.25Hz
         :param sr:
+        :param lowpass_fir_taps: Optional filter: 0 deactivates filtering before indexing. TODO Try 21? (31 too expensive...)
         :param lowpass_fir_nu_c: Normalized cut-off frequency in [0.0, 0.5[. The default value is a compromise
                                  that leaves some high-frequency contents for a low F0 and a reasonable amont of
                                  aliasing for a high F0.
@@ -86,23 +91,34 @@ class WavetableSynth(nn.Module):
 
         # Low-pass filtering (before accumulated-phase indexing)
         self.fir_taps, self.fir_nu_c = lowpass_fir_taps, lowpass_fir_nu_c
-        assert self.fir_taps % 2 == 1,  "Odd number of taps expected (Type I Low-Pass)"
-        assert 0.05 <= self.fir_nu_c <= 0.45, "Don't expect too small or too high cut-offs (Nyquist freq = 0.5)"
-        h_lowpass = 2 * self.fir_nu_c * torch.sinc(
-            2 * self.fir_nu_c * torch.arange(-(self.fir_taps - 1) // 2, 1 + (self.fir_taps - 1) // 2)
-        )
-        h_lowpass *= torch.hamming_window(self.fir_taps, periodic=False)
-        # unsqueeze fir coefficients: will be used as torch 1D conv kernels
-        self.fir_h = nn.Parameter(h_lowpass.unsqueeze(dim=0).unsqueeze(dim=0))  # shape 1 x 1 x N_taps
-        self.fir_h.requires_grad = False
+        if self.fir_taps > 0:
+            assert self.fir_taps % 2 == 1,  "Odd number of taps expected (Type I Low-Pass)"
+            assert 0.05 <= self.fir_nu_c <= 0.45, "Don't expect too small or too high cut-offs (Nyquist freq = 0.5)"
+            h_lowpass = windowed_sinc_low_pass_filter(self.fir_taps, self.fir_nu_c)
+            # unsqueeze fir coefficients: will be used as torch 1D conv kernels
+            self.fir_h = nn.Parameter(h_lowpass.view(1, 1, self.fir_taps))
+            self.fir_h.requires_grad = False
+        else:
+            self.fir_h = None
 
-        # TODO reimplement this using a matrix wavetable -> should reduce training times / nb CUDA ops
+        # Cannot use a matrix wavetable (would reduce training times / nb CUDA ops...) because somes lines are
+        # learned, other are not
         if wavetables is None:  # Build wavetables (some might be forced to be a purely sinusoidal harmonic)
-            # TODO, for reproducibility: always init the wavetables with the same random seeds
-            self.wavetables = nn.ParameterList([
-                nn.Parameter(torch.empty(wavetable_len).normal_(mean=0, std=0.01))  # TODO check others
-                for _ in range(n_wavetables)
-            ])
+            # For reproducibility: always init the wavetables with the same random seeds
+            self.wavetables = list()
+            h_lowpass, n_reflect = windowed_sinc_low_pass_filter(31, 0.1).view(1, 1, 31), 15
+            for i in range(n_wavetables):
+                rng_cpu = torch.Generator()
+                rng_cpu.manual_seed(20240525 + i)
+                # TODO check other STDs ?
+                wt = torch.normal(mean=torch.zeros((wavetable_len, )), std=0.01, generator=rng_cpu)
+                # TODO maybe apply LP filter right after initialization?
+                #    to prevent training on white noise
+                #wt = torch.cat((wt[-n_reflect:], wt, wt[:n_reflect]), dim=0).view(1, 1, -1)
+                #wt = torch.nn.functional.conv1d(wt, h_lowpass).squeeze()
+                self.wavetables.append(nn.Parameter(wt))
+            self.wavetables = nn.ParameterList(self.wavetables)
+
             # Initialize pure harmonic wavetables (non-learnable)
             for idx, wt in enumerate(self.wavetables):
                 # Regarding phase: ICASSP22 paper states:
@@ -117,19 +133,19 @@ class WavetableSynth(nn.Module):
                     wt.requires_grad = False
                 else:  # Randomly initialized; phase will never be locked (unconstrained learning)
                     wt.requires_grad = True
-                    # TODO maybe apply LP filter right after initialization?
-                    #    to prevent training on white noise
 
         else:  # Load some pre-computed wavetables
             self.wavetables = wavetables
 
         # Create reflection-padded versions of the wavetables for filtering - unsqueeze them already for torch conv
-        n_reflect = (self.fir_taps - 1) // 2
-        self.wavetables_reflect_padded = nn.ParameterList([
-            torch.cat((wt[-n_reflect:], wt, wt[:n_reflect]), dim=0).unsqueeze(dim=0).unsqueeze(dim=0)
-            for wt in self.wavetables
-        ])
-
+        if self.fir_h is not None:
+            n_reflect = (self.fir_taps - 1) // 2
+            self.wavetables_reflect_padded = nn.ParameterList([
+                torch.cat((wt[-n_reflect:], wt, wt[:n_reflect]), dim=0).unsqueeze(dim=0).unsqueeze(dim=0)
+                for wt in self.wavetables
+            ])
+        else:
+            self.wavetables_reflect_padded = self.wavetables
 
     def forward(self, pitch, envelope, attention):
         """
@@ -144,7 +160,7 @@ class WavetableSynth(nn.Module):
         output_waveform_lst = []
         # Generate constant-envelope waveforms from the wavetables
         for wt_idx, wt_padded in enumerate(self.wavetables_reflect_padded):
-            waveform = wavetable_osc(wt_padded, pitch, self.sr, self.fir_h)
+            waveform = wavetable_osc(wt_padded, pitch, self.sr, self.fir_h)  # Filtering may be disabled
             output_waveform_lst.append(waveform)
         output_waveform = torch.stack(output_waveform_lst, dim=2)
         # Then apply the attentions (local envelopes for each waveform)
