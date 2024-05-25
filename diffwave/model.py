@@ -47,7 +47,9 @@ class Reverb(nn.Module):
 
 class DDSP_WTS(nn.Module):
     def __init__(self, hidden_size, n_harmonic, n_bands, sampling_rate,
-                 block_size, n_wavetables, mode="wavetable", duration_secs=3,
+                 block_size,
+                 n_wavetables, n_wt_pure_harmonics=0,
+                 mode="wavetable", duration_secs=3,
                  n_mfcc=30, use_reverb=False, upsampling_mode="nearest"):
         super().__init__()
         self.hidden_size, self.synth_mode, self.duration_secs, self.n_mfcc = hidden_size, mode, duration_secs, n_mfcc
@@ -79,8 +81,7 @@ class DDSP_WTS(nn.Module):
             self.wts = None
         elif self.synth_mode == "wavetable":
             self.partials_projection = nn.Linear(hidden_size, n_wavetables + 1)
-            self.wts = WavetableSynth(
-                n_wavetables=n_wavetables, sr=sampling_rate, duration_secs=duration_secs, block_size=block_size)
+            self.wts = WavetableSynth(n_wavetables=n_wavetables, sr=sampling_rate, n_pure_harmonics=n_wt_pure_harmonics)
         else:
             raise ValueError(self.synth_mode)
         self.noise_projection = nn.Linear(hidden_size, n_bands)

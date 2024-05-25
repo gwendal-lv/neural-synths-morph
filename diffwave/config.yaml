@@ -1,7 +1,7 @@
 dataset:
-  train_path: "/media/gwendal/Data/Datasets/Dexed_split/diffwave_train/"  # TODO full ds : remove diffwave_ prefix
-  valid_path: "/media/gwendal/Data/Datasets/Dexed_split/diffwave_valid/"
-  test_path: "/media/gwendal/Data/Datasets/Dexed_split/diffwave_test/"
+  train_path: "/media/gwendal/Data/Datasets/Dexed_split/train/"
+  valid_path: "/media/gwendal/Data/Datasets/Dexed_split/valid/"
+  test_path: "/media/gwendal/Data/Datasets/Dexed_split/test/"
   audio: "audio/"
   pitch: "pitch/"
   loudness: "loudness/"
@@ -12,25 +12,27 @@ common:
   duration_secs: 4
 
 model:
-  name: "debug_wtAttention"
+  name: "LPfilt"
   synth_mode: "wavetable"  # harmonic or wavetable
   n_mfcc: 30
   hidden_size: 512
   n_harmonic: 100
   n_bands: 65
   n_wavetables: 10
+  n_wt_pure_harmonics: 0
   upsampling_mode: "nearest"
   device: "cuda:0"
 
 train:
-  root_logs_dir: "/media/gwendal/Data/Logs/neural-synths-morph"
+  root_logs_dir: "/media/gwendal/Data/Logs/neural-synths-morph/dev1"
   batch_size: 64
   scales: [4096, 2048, 1024, 512, 256, 128]
   overlap: .75
+  loss: 'lin+log'  # Only linear MSS loss (lin), or linear+logarithmic (lin+log)
   start_lr: 0.002
   stop_lr: 0.0002
-  epochs: 200  # TODO wavetable trains much slower
-  loss: 'lin'  # Only linear MSS loss (lin), or linear+logarithmic (lin+log)
+  epochs: 100  # TODO wavetable trains much slower
+  plot_period_epochs: 1  # Increase to reduce the amont of save data (and speedup training a bit)
 
 test:
   batch_size: 2

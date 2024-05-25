@@ -19,9 +19,7 @@ conda install pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit
 
 Then install the following:
 
-TODO remove effortless_config (and tensorboardX) if not used anymore...
-
-```pip3 install numpy pandas scipy effortless_config SoundFile einops librosa tqdm pyyaml nnAudio tensorboardX```
+```pip3 install numpy pandas scipy soundfile einops librosa tqdm pyyaml nnAudio tensorboardX```
 
 As of May 2024, Tensorflow requires Python >= 3.9 and <= 3.11. Tensorflow dependency: only for CREPE pitch estimation (during preprocessing).
 <!-- CPU only to prevent conflicts with PyTorch's CUDA packages (conda installed...) in the venv. -->

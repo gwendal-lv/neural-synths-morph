@@ -11,6 +11,7 @@ import torch
 import yaml
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
+import soundfile as sf
 
 from dataloader import get_data_loader
 from model import DDSP_WTS, MSS_loss
@@ -39,7 +40,9 @@ def train_model(config):
     model = DDSP_WTS(
         hidden_size=config["model"]["hidden_size"], n_harmonic=config["model"]["n_harmonic"],
         n_bands=config["model"]["n_bands"], sampling_rate=sr, block_size=config["common"]["block_size"],
-        n_wavetables=config["model"]["n_wavetables"], mode=config["model"]["synth_mode"], duration_secs=duration_secs,
+        n_wavetables=config["model"]["n_wavetables"], n_wt_pure_harmonics=config['model']['n_wt_pure_harmonics'],
+        mode=config["model"]["synth_mode"],
+        duration_secs=duration_secs,
         n_mfcc=config["model"]["n_mfcc"], upsampling_mode=config["model"]["upsampling_mode"]
     )
     model.to(device)
@@ -92,28 +95,43 @@ def train_model(config):
 
         # - - - Validation (at each epoch) - - -
         with torch.no_grad():
+            valid_audio_target, valid_audio_output = None, None
             losses = list()
             for audio_target, loudness, pitch in valid_dl:
                 audio_target, loudness, pitch = audio_target.to(device), loudness.to(device), pitch.to(device)
                 mfcc = model.compute_MFCC(audio_target)
                 audio_output, Z = model(mfcc, pitch, loudness)
                 losses.append(MSS_loss(audio_output, audio_target, scales, overlap, add_log_loss).item())
+                # Backup of the first minibatch only; may be plotted/saved just after this
+                if valid_audio_target is None:
+                    valid_audio_target = audio_target.cpu().numpy()
+                    valid_audio_output = audio_output.cpu().squeeze(dim=2).numpy()
             valid_logger.add_scalar(f"MSSloss/{config['train']['loss']}", np.mean(losses), global_step=step_index)
 
             # - - - plots (pas à toutes les epochs) and save the model - - -
-            if epoch % 10 == 0:  # Epoch starts at 1 (not 0)
+            if epoch % config['train']['plot_period_epochs'] == 0:  # Epoch starts at 1 (not 0)
+                # Save audio (first items from the saved minibatch), directly into the logs folder
+                #    we concatenate a few GT/reconstructed samples and save everything into a single file
+                concat_audio = list()
+                for i in range(10):
+                    concat_audio += [valid_audio_target[i, :], valid_audio_output[i, :]]
+                concat_audio = np.concatenate(concat_audio)
+                sf.write(log_dir.joinpath(f'audio_epoch{epoch:03d}.flac'), concat_audio, sr)
+                # Plot 2 original and reconstructed spectrograms (or mel-specs?)
+                fig, axes = plots.spectrograms(valid_audio_target[0:2, :], valid_audio_output[0:2, :])
+                valid_logger.add_figure("audio_recons", fig, close=True, global_step=step_index)
                 # Plot the wavetable, also compute stats and log those
                 if model.synth_mode == 'wavetable':
                     wavetables = np.asarray([wt.clone().detach().cpu().numpy() for wt in model.wts.wavetables])
-                    fig, axes, average_rms, average_max_amplitude = plots.wavetables(wavetables)
-                    # TODO proper logging... AND remember that a tanh is applied to learned WTs
+                    fig, axes, average_rms, average_max_amplitude = plots.wavetables(
+                        wavetables, n_fixed_waves=config['model']['n_wt_pure_harmonics'])
                     train_logger.add_scalar("wavetable/RMS", average_rms, global_step=step_index)
                     train_logger.add_scalar("wavetable/max", average_max_amplitude, global_step=step_index)
                     train_logger.add_figure("wavetables_plot", fig, close=True, global_step=step_index)
 
                 # Small models (a few MBs)
                 torch.save(model.state_dict(), log_dir.joinpath("model.pt"))
-
+    torch.save(model.state_dict(), log_dir.joinpath("model.pt"))
 
 if __name__ == "__main__":
     with open("config.yaml", 'r') as stream:
