@@ -27,8 +27,11 @@ def wavetable_osc(wavetable_padded, freqs, sr, fir_h=None):
         wavetable = torch.nn.functional.conv1d(wavetable_padded, fir_h).squeeze()  # Won't work for high f0
     else:
         wavetable = wavetable_padded
-    # A true solution to prevent aliasing may be to integrate aliasing quantification as a backproped loss....
-    # Or: generate time-varying filters (much more expensive to apply/compute), cut-off depending on local F0?
+    # Better solution: generate time-varying filters (much more expensive to apply/compute), cut-off depending on local
+    # F0? these filters could be applied during inference only - not during training ("smooth" waveforms seem to appear)
+    # In practice: aliasing is taken of by the MSS loss... but for pitches of the training set only.
+    #    In contrast to the paper, filtering seems to impair the training (and does not seem necessary)
+    #     TODO implement some anti-aliasing for synth playback only? (not during training)
 
     # Wavetable indexes computation: does not need to be differentiable (freqs estimation was not)
     freqs = torch.squeeze(freqs, dim=2)  # After squeeze: Shape N_minibatch x L_audio
@@ -78,10 +81,10 @@ class WavetableSynth(nn.Module):
 
         :param wavetables:
         :param n_wavetables:
-        :param wavetable_len:  Default 512. diffwave ICASSP22 paper says OK for the lowest 20Hz F0 at 16kHz;
+        :param wavetable_len:  Default 512. diffwave ICASSP22 paper says "OK" for the lowest 20Hz F0 at 16kHz;
                                 sampling the fundamental wave at 1/sr corresponds to 16kHz / 512 = 31.25Hz
         :param sr:
-        :param lowpass_fir_taps: Optional filter: 0 deactivates filtering before indexing. TODO Try 21? (31 too expensive...)
+        :param lowpass_fir_taps: Optional filter: 0 deactivates wt filtering before indexing (sort of antialiasing...)
         :param lowpass_fir_nu_c: Normalized cut-off frequency in [0.0, 0.5[. The default value is a compromise
                                  that leaves some high-frequency contents for a low F0 and a reasonable amont of
                                  aliasing for a high F0.

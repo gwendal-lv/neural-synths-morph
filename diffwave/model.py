@@ -45,6 +45,17 @@ class Reverb(nn.Module):
         return x
 
 
+def config_to_model_kwargs(config):
+    return {
+        'hidden_size': config["model"]["hidden_size"], 'n_harmonic': config["model"]["n_harmonic"],
+        'n_bands': config["model"]["n_bands"],
+        'sampling_rate': config["common"]["sampling_rate"], 'block_size': config["common"]["block_size"],
+        'n_wavetables': config["model"]["n_wavetables"], 'n_wt_pure_harmonics': config['model']['n_wt_pure_harmonics'],
+        'mode': config["model"]["synth_mode"], 'duration_secs': config["common"]["duration_secs"],
+        'n_mfcc': config["model"]["n_mfcc"], 'upsampling_mode': config["model"]["upsampling_mode"]
+    }
+
+
 class DDSP_WTS(nn.Module):
     def __init__(self, hidden_size, n_harmonic, n_bands, sampling_rate,
                  block_size,
@@ -61,7 +72,8 @@ class DDSP_WTS(nn.Module):
         self.register_buffer("block_size", torch.tensor(block_size))
 
         # Pre-processing
-        self.mean_loudness, self.std_loudness = -39.74668743704927, 54.19612404969509  # NSynth train set FIXME load from dataset's statistics
+        self.mean_loudness, self.std_loudness = -39.74668743704927, 54.19612404969509  # NSynth train set
+        #self.mean_loudness, self.std_loudness = -28.654367014678332, 59.86895554249753  # TODO USE Dexed train set
         self.compute_MFCC = nnAudio.features.mel.MFCC(sr=sampling_rate, n_mfcc=n_mfcc)
 
         # Original DDSP: "normalization layer with learnable shift and scale parameters"
@@ -91,26 +103,29 @@ class DDSP_WTS(nn.Module):
         self.register_buffer("phase", torch.zeros(1))
 
 
-    def forward(self, mfcc, pitch, loudness):  # TODO enable synthesis from Z if provided directly
+    def forward(self, mfcc, pitch, loudness, Z=None):
         loudness = (loudness - self.mean_loudness) / self.std_loudness
         pitch, loudness = pitch.unsqueeze(-1).float(), loudness.unsqueeze(-1).float()
 
-        # - - - Encode mfcc first - - -
-        mfcc = torch.transpose(mfcc, 1, 2)
-        # Shape after transpose: N x L_MFCC x n_MFCC
-        #     where L_MFCC is the number of MFCC frames != L_frames (number of audio frames (tokens))
-        # use layer norm instead of trainable norm, not much difference found
-        mfcc = self.layer_norm(mfcc)  # TODO use train dataset's stats
-        Z = self.gru_mfcc(mfcc)[0]  # output [1] would be the last hidden state for each GRU layer - we discard it
-        Z = self.mlp_mfcc(Z)  # After this: Z shape is N x L_MFCC x 16
+        # - - - Encode mfcc first ; or bypass if Z was provided directly - - -
+        if Z is None:
+            mfcc = torch.transpose(mfcc, 1, 2)
+            # Shape after transpose: N x L_MFCC x n_MFCC
+            #     where L_MFCC is the number of MFCC frames != L_frames (number of audio frames (tokens))
+            # use layer norm instead of trainable norm, not much difference found
+            mfcc = self.layer_norm(mfcc)  # could use train dataset's stats...
+            Z = self.gru_mfcc(mfcc)[0]  # output [1] would be the last hidden state for each GRU layer - we discard it
+            Z = self.mlp_mfcc(Z)  # After this: Z shape is N x L_MFCC x 16
+        else:
+            assert mfcc is None, "Either MFCC or optional Z should be provided."
         # use image resize to align dimensions, ddsp also do this... TODO CHECK this: seems OK but can't find the source
         # FIXME use a variable factor for resize ; 100 only works with the default config 16kHz block 160
-        Z = Resize(size=(self.duration_secs * 100, 16))(Z)  # After this: Z shape is N x L_frames x 16
+        Z_resampled = Resize(size=(self.duration_secs * 100, 16))(Z)  # After this: Z shape is N x L_frames x 16
 
         # - - - Decoder - - -
         pitch_hidden = self.decoder_in_mlps[0](pitch)
         loudness_hidden = self.decoder_in_mlps[1](loudness)
-        Z_decoder_hidden = self.decoder_in_mlps[2](Z)
+        Z_decoder_hidden = self.decoder_in_mlps[2](Z_resampled)
         decoder_hidden = torch.cat([pitch_hidden, loudness_hidden, Z_decoder_hidden], -1)
         # Why bypass the GRU? Skip-connection? DDSP paper indicates a skip-co from F0; then, page 16:
         # "we concatenate the GRU outputs with outputs of f(t) and l(t) MLPs (in the channel dimension)";
@@ -140,7 +155,6 @@ class DDSP_WTS(nn.Module):
             envelope = torch.sigmoid(envelope) + 1e-7  # same as DDSP, for stability
             # softmax for amplitudes. Amplitudes' shape: N_minibatch x L_frames x N_wavetables
             amplitudes = torch.softmax(amplitudes, dim=2)
-            # TODO (try) prevent aliasing for WTS!
         # upsample synthesis parameters to audio rate
         pitch = upsample(pitch, self.block_size, self.upsampling_mode)
         envelope = upsample(envelope, self.block_size, self.upsampling_mode)
@@ -157,14 +171,12 @@ class DDSP_WTS(nn.Module):
 
         # - - - noise signal synthesis - - -
         noise_param = scale_magnitudes(self.noise_projection(decoder_hidden) - 5)
-
         impulse = amp_to_impulse_response(noise_param, self.block_size)
         noise = torch.rand(
             impulse.shape[0],
             impulse.shape[1],
             self.block_size,
         ).to(impulse) * 2 - 1
-
         noise = fft_convolve(noise, impulse).contiguous()
         noise = noise.reshape(noise.shape[0], -1, 1)
 

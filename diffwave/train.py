@@ -14,7 +14,7 @@ from tensorboardX import SummaryWriter
 import soundfile as sf
 
 from dataloader import get_data_loader
-from model import DDSP_WTS, MSS_loss
+from model import DDSP_WTS, MSS_loss, config_to_model_kwargs
 import plots
 
 
@@ -26,7 +26,6 @@ def train_model(config):
     # general parameters
     device = config['model']['device']
     sr = config["common"]["sampling_rate"]
-    duration_secs = config["common"]["duration_secs"]
     batch_size = config["train"]["batch_size"]
     scales = config["train"]["scales"]
     overlap = config["train"]["overlap"]
@@ -36,20 +35,12 @@ def train_model(config):
     add_log_loss = (config['train']['loss']  == 'lin+log')
 
 
-    # TODO use a config to kwargs method here
-    model = DDSP_WTS(
-        hidden_size=config["model"]["hidden_size"], n_harmonic=config["model"]["n_harmonic"],
-        n_bands=config["model"]["n_bands"], sampling_rate=sr, block_size=config["common"]["block_size"],
-        n_wavetables=config["model"]["n_wavetables"], n_wt_pure_harmonics=config['model']['n_wt_pure_harmonics'],
-        mode=config["model"]["synth_mode"],
-        duration_secs=duration_secs,
-        n_mfcc=config["model"]["n_mfcc"], upsampling_mode=config["model"]["upsampling_mode"]
-    )
+    model = DDSP_WTS(**config_to_model_kwargs(config))
     model.to(device)
 
     # full batches only? maybe not be required if batch norm is not used (seems to be layer norm only)
     train_dl = get_data_loader(config, mode="train", batch_size=batch_size)
-    valid_dl = get_data_loader(config, mode="valid", batch_size=batch_size)
+    valid_dl = get_data_loader(config, mode="valid", batch_size=batch_size, shuffle=False)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config["train"]["start_lr"])
     gamma = np.exp((np.log(config["train"]["stop_lr"]) - np.log(config["train"]["start_lr"]))
@@ -81,6 +72,10 @@ def train_model(config):
 
             loss = MSS_loss(audio_output, audio_target, scales, overlap, add_log_loss)
             train_logger.add_scalar(f"MSSloss/{config['train']['loss']}", loss.item(), global_step=step_index)
+
+            # TODO try implement extra wavetable loss: minimize cross-correlation because the wavetables
+            #   (otherwise, multiple waveforms tend to become the same).
+            # Risk is that wavetables degenerate to low-correlation noise...
 
             optimizer.zero_grad()
             loss.backward()

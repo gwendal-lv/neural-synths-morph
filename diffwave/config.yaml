@@ -12,14 +12,14 @@ common:
   duration_secs: 4
 
 model:
-  name: "baseline_4harm_NOfilt"
+  name: "debug"
   synth_mode: "wavetable"  # harmonic or wavetable
   n_mfcc: 30
   hidden_size: 512
   n_harmonic: 100
   n_bands: 65
   n_wavetables: 10
-  n_wt_pure_harmonics: 0
+  n_wt_pure_harmonics: 4
   upsampling_mode: "nearest"
   device: "cuda:0"
 
@@ -32,7 +32,7 @@ train:
   start_lr: 0.002
   stop_lr: 0.0002
   epochs: 100  # TODO wavetable trains much slower
-  plot_period_epochs: 1  # Increase to reduce the amont of save data (and speedup training a bit)
+  plot_period_epochs: 5  # Increase to reduce the amont of saved data (and speedup training a bit)
 
 test:
   batch_size: 2
