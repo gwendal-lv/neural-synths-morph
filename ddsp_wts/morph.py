@@ -21,12 +21,13 @@ def morph(model_dir: Path, dataset_dir: Path, n_steps=9, device='cuda:0'):
     :param model_dir: Model directory with the config.yaml files and model weights.
     :param dataset_dir: Directory of the validation or test dataset: contains the audio, loudness, pitch subfolders,
                         and the morph_sequences.json file
-    :return:
     """
-    # TODO reload the config, then the model
+    # Reload the config, then the model
     print(f"Loading model {model_dir.parent.name}/{model_dir.name}...")
     with open(model_dir.joinpath('config.yaml'), 'r') as stream:
         config = yaml.safe_load(stream)
+    sr = config["common"]["sampling_rate"]
+
     model = DDSP_WTS(**config_to_model_kwargs(config))
     model.load_state_dict(torch.load(model_dir.joinpath("model.pt")))
     model.eval()
@@ -34,7 +35,6 @@ def morph(model_dir: Path, dataset_dir: Path, n_steps=9, device='cuda:0'):
     model.to(device)
 
     # Now process the whole dataset
-    sr = config["common"]["sampling_rate"]
     # The .json file should be a list of dicts where each dict describes a sequence, e.g. :
     # {"seq_index": 1498, "audio_start": "044165_pitch056vel075_var000.wav", "audio_end": "077637_pitch056vel075_var000.wav"}
     with open(dataset_dir.joinpath("morph_sequences.json"), 'r') as f:
@@ -89,7 +89,7 @@ def morph(model_dir: Path, dataset_dir: Path, n_steps=9, device='cuda:0'):
 
 if __name__ == "__main__":
     morph(
-        Path("/media/gwendal/Data/Logs/neural-synths-morph/final/ddsp_hm_100epochs"),
+        Path("/media/gwendal/Data/Logs/neural-synths-morph/final/ddsp_wt_20wt5pureharm"),
         Path("/media/gwendal/Data/Datasets/Dexed_split/test/"),
         9
     )
