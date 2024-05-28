@@ -4,7 +4,12 @@ import sys
 from typing import Any, Dict
 
 import gin
+
+# pytorch_lightning uses tensorboard which uses tensorflow (CPU-only install), but messes up with pytorch's CUDA
+import tensorflow as tf
+tf.config.set_visible_devices([], 'GPU')
 import pytorch_lightning as pl
+
 import torch
 from absl import flags, app
 from torch.utils.data import DataLoader

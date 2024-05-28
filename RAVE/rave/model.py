@@ -1,3 +1,5 @@
+import warnings
+
 import math
 from time import time
 from typing import Callable, Optional, Iterable, Dict
@@ -7,6 +9,8 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
+# torch.fx decorators not found: solution suggested from https://github.com/huggingface/transformers/issues/27534#issuecomment-1849925316
+from torch.fx import symbolic_trace
 from einops import rearrange
 from sklearn.decomposition import PCA
 from pytorch_lightning.trainer.states import RunningStage
@@ -266,7 +270,7 @@ class RAVE(pl.LightningModule):
 
     def forward(self, x):
         z = self.encode(x, return_mb=False)
-        z = self.encoder.reparametrize(z)[0]
+        z = self.encoder.reparametrize(z)[0]  # TODO this z could be used for morphing
         return self.decode(z)
 
     def on_train_batch_end(self, outputs, batch, batch_idx) -> None:
@@ -433,6 +437,18 @@ class RAVE(pl.LightningModule):
 
         z = self.encoder.reparametrize(z)[0]
         y = self.decode(z)
+
+        # FIXME - - - quick and dirty attempt to fix this mismatch in the MSS loss inputs' shapes - - -
+        #  https://github.com/acids-ircam/RAVE/issues/309
+        #  https://github.com/acids-ircam/RAVE/issues/157
+        assert (len(x.shape) == len(y.shape) == 3) and (x.shape[1] == y.shape[1] == 1), "Expected: 1d batched signals as 3D tensors"
+        if x.shape[2] < y.shape[2]:  # Crop output
+            # warnings.warn("Cropping output y for MSS loss")
+            # TODO should we crop the beginning instead of the end? Or center the crop?
+            y = y[:, :, 0:x.shape[2]]
+        elif x.shape[2] > y.shape[2]:
+            raise AssertionError("Output is shorter than input")
+        # FIXME - - - end of quick and dirty fix - - -
 
         distance = self.audio_distance(x, y)
         full_distance = sum(distance.values())

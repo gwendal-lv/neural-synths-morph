@@ -16,4 +16,5 @@ PKG-INFO
 
 # Ignored for neural-synths-morph
 docs/*
+notes.md
 

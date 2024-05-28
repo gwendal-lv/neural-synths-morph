@@ -7,7 +7,8 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from scipy.optimize import fmin
-from scipy.signal import firwin, kaiser, kaiser_beta, kaiserord
+# Removed unused import statements kaiser and kaiser_beta (scipy version issue); not called directly anyway
+from scipy.signal import firwin, kaiserord
 
 
 def reverse_half(x):
@@ -176,7 +177,7 @@ def classic_inverse(x, hk):
     return y
 
 
-@torch.fx.wrap
+# @torch.fx.wrap  TODO check that OK (maybe used for max/nn-tilde export only?)
 class PQMF(nn.Module):
     """
     Pseudo Quadrature Mirror Filter multiband decomposition / reconstruction
