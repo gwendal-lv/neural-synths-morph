@@ -4,18 +4,17 @@
 PyTorch code for neural synths has been adapted from the following repositories:
 - DDSP: https://github.com/acids-ircam/ddsp_pytorch
 - DiffWave: https://github.com/gudgud96/diff-wave-synth
-
-TODO : a waveform synth (not wavenet, too slow...) ;
-either RAVE, or maybe one with a wavernn ?
+- RAVE: https://github.com/acids-ircam/RAVE
 
 # Setup 
 
 First, create a venv based on python 3.9 and activate it. 
 <!-- conda create -n neuralsynths python=3.9 ipython -->
 
-Install PyTorch using the official instructions.
-<!-- Specific CUDA version (older than the system's CUDA ?), without requiring conda-forge:
-conda install pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.3 -c pytorch -->
+Install PyTorch using the official instructions. 
+<!-- conda install pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.3 -c pytorch -->
+Everything has been tested with quite old PyTorch and CUDA versions (```pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.3```)
+but should work in an up-to-date environment.
 
 Then install the following:
 
@@ -30,3 +29,7 @@ CREPE install may behave weirdly with pip: console output stuck, terminal does n
 The install seems to be OK though :
 
 ```pip3 install crepe```
+
+If you want to use RAVE, also install:
+
+```pip3 install udls gin-config cached-conv GPUtil pytorch_lightning==1.9.0```
