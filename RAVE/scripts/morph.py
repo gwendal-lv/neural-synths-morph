@@ -73,7 +73,7 @@ def main(argv):
     morphs_base_dir.mkdir(parents=False, exist_ok=False)
 
     # Process all required sequences
-    for seq_idx, seq_info in enumerate(tqdm(morph_seqs[0:10])):   # FIXME , temp debug
+    for seq_idx, seq_info in enumerate(tqdm(morph_seqs)):
         assert seq_info['seq_index'] == seq_idx
         seq_dir = morphs_base_dir.joinpath(f'{seq_idx:05d}')
         seq_dir.mkdir(parents=False, exist_ok=False)
@@ -109,7 +109,7 @@ def main(argv):
         for step_idx in range(audio_interp.shape[0]):
             # Resample to the original sr, then save
             y = librosa.resample(y=audio_interp[step_idx, 0, :].numpy(), orig_sr=rave_model.sr, target_sr=in_out_sr)
-            sf.write(seq_dir.joinpath(f'audio_step{step_idx:02d}_original.wav'), y, in_out_sr)
+            sf.write(seq_dir.joinpath(f'audio_step{step_idx:02d}.wav'), y, in_out_sr)
 
 
 
