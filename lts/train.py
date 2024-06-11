@@ -146,7 +146,7 @@ def train(seed=20240607):
             if (epoch % checkpoint_interval == 0 and epoch > 0) or (epoch == n_epochs - 1):
                 torch.save(model.state_dict(), checkpoint_dir / f'model_epoch{epoch:05d}')
 
-            if (epoch % plot_interval == 0 and epoch > 0) or (epoch == n_epochs - 1):
+            if (epoch % plot_interval == 0) or (epoch == n_epochs - 1):
                 # Generate a few audio files
                 # Retrieve original audio
                 indices = [(step_index + i) % len(validation_dataset) for i in range(4)]

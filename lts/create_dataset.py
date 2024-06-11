@@ -1,15 +1,15 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 
-import warnings
-
 import numpy as np
 
-import os, sys, argparse, shutil
+import os, argparse, shutil
 from multiprocessing import Pool
 
-import librosa
 from pathlib import Path
 import configparser
+
+import ltsp.model
+
 
 
 # Parse arguments
@@ -55,26 +55,9 @@ def calculate_cqt(f, verbose=False):
     outfile = cqt_dataset_dir.joinpath(f.stem + '.npy')
 
     try:
-        s, fs = librosa.load(f, sr=None)
-        if fs != sampling_rate:
-            if verbose:
-                warnings.warn(f"Resampling {f} from {fs} to {sampling_rate} Hz")
-            s, fs = librosa.load(f, sr=sampling_rate)
-
-        # Get the CQT magnitude
-        C_complex = librosa.cqt(y=s, sr=sampling_rate, hop_length=hop_length, bins_per_octave=bins_per_octave,
-                                n_bins=n_bins)
-        C = np.abs(C_complex)
-        # pytorch expects the transpose of librosa's output
-        C = np.transpose(C)
-
-        # Choose the datatype
-        if cqt_bit_depth == 'float32':
-            C = C.astype('float32')
-        elif cqt_bit_depth == 'float64':
-            pass
-        else:
-            raise TypeError('cqt_bit_depth datatype is unknown. Choose either float32 or float64')
+        C = ltsp.model.compute_CQT_from_file(
+            f, sampling_rate, hop_length, bins_per_octave, n_bins, cqt_bit_depth, verbose
+        )
         if verbose:
             print('writing: {}'.format(outfile))
         # Raw: 2 MB for each 4s audio file... almost triples the original dataset's size

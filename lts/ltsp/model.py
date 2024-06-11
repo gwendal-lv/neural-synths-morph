@@ -1,3 +1,7 @@
+from __future__ import division, absolute_import, print_function, unicode_literals
+
+import warnings
+
 import numpy as np
 import librosa
 import torch
@@ -25,6 +29,31 @@ def process_audio_config(config):
     return sampling_rate, hop_length, bins_per_octave, num_octaves, n_bins, n_iter, cqt_bit_depth, dtype
 
 
+def compute_CQT_from_file(f,
+                          sampling_rate: int, hop_length: int, bins_per_octave: int, n_bins: int, cqt_bit_depth: str,
+                          verbose=False):
+    s, fs = librosa.load(f, sr=None)
+    if fs != sampling_rate:
+        if verbose:
+            warnings.warn(f"Resampling {f} from {fs} to {sampling_rate} Hz")
+        s, fs = librosa.load(f, sr=sampling_rate)
+    # Get the CQT magnitude
+    C_complex = librosa.cqt(y=s, sr=sampling_rate, hop_length=hop_length, bins_per_octave=bins_per_octave,
+                            n_bins=n_bins)
+    C = np.abs(C_complex)
+    # pytorch expects the transpose of librosa's output
+    C = np.transpose(C)
+    # Choose the datatype
+    if cqt_bit_depth == 'float32':
+        C = C.astype('float32')
+    elif cqt_bit_depth == 'float64':
+        pass
+    else:
+        raise TypeError('cqt_bit_depth datatype is unknown. Choose either float32 or float64')
+    return C
+
+
+
 class VAE(nn.Module):
     def __init__(self, n_bins, n_units, latent_dim):
         super(VAE, self).__init__()
@@ -37,6 +66,10 @@ class VAE(nn.Module):
         self.fc2 = nn.Linear(n_units, 2 * latent_dim)
         self.fc3 = nn.Linear(latent_dim, n_units)
         self.fc4 = nn.Linear(n_units, n_bins)
+
+    @property
+    def dtype(self):
+        return self.fc1.weight.dtype
 
     def encode(self, x):
         h = self.fc2(F.relu(self.fc1(x)))
