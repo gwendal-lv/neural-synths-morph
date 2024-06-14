@@ -199,3 +199,49 @@ def MSS_loss(audio_output, audio_target, scales, overlap, add_log_loss):
             log_loss = (safe_log(s_x) - safe_log(s_y)).abs().mean()
             loss += log_loss
     return loss
+
+
+def AR_latent_loss(Z: torch.Tensor, target_attributes: torch.Tensor, delta=5.0, loss_factor=0.5):
+    """
+    Regularizes the first Z dimensions.
+
+    https://arxiv.org/abs/2004.05485 , https://arxiv.org/abs/2108.01450
+    """
+    N_A = target_attributes.shape[1]  # Number of attributes = num. regularized latent dims
+    M_dataloader, N_time_frames, D_Z = Z.shape[0], Z.shape[1], Z.shape[2]
+    if N_A == 0:
+        return 0.0
+    else:
+        assert N_A <= D_Z
+    # We apply loss properly for matrix-shaped Z: 1st dim is batch dim, 2nd is time, 3rd is latent dims for a time frame
+    # --> turn the different time frames into new batch elements
+    Z = Z.view(M_dataloader * N_time_frames, D_Z)
+    target_attributes = target_attributes.unsqueeze(dim=1).expand(M_dataloader, N_time_frames, N_A)
+    target_attributes = target_attributes.reshape(M_dataloader * N_time_frames, N_A)  # not contiguous (no .view(...))
+    # We'll compute the loss for each time frame (encode the same timbre attribute value for all time frames
+    M = Z.shape[0]  # new "apparent minibatch size" = minibatch size * number of time frames
+
+    # attributes distance matrix
+    assert tuple(target_attributes.T.shape) == (N_A, M)
+    expanded_rows_attributes = target_attributes.T.unsqueeze(dim=2).expand(N_A, M, M)
+    expanded_cols_attributes = expanded_rows_attributes.transpose(1, 2)
+    attributes_distance_matrices = expanded_rows_attributes - expanded_cols_attributes
+
+    # compute null attr diff mask: we won't use the gradient when attributes are very close
+    # (the difference's sign becomes meaningless)  FIXME maybe useless using torch.sign ????
+    gradient_mask = torch.isclose(attributes_distance_matrices, torch.zeros_like(attributes_distance_matrices))
+    gradient_mask = 1.0 - gradient_mask.float()
+    # latent values (representation r) distance matrix - only the regularized subset of latent values
+    Z = Z[:, 0:N_A]
+    assert tuple(Z.T.shape) == (N_A, M)
+    expanded_rows_latent = Z.T.unsqueeze(dim=2).expand(N_A, M, M)
+    expanded_cols_latent = expanded_rows_latent.transpose(1, 2)
+    latent_distance_matrices = expanded_rows_latent - expanded_cols_latent
+    # null loss if attributes were equal
+    sign_based_error = torch.abs(torch.tanh(delta * latent_distance_matrices)
+                                 - torch.sign(attributes_distance_matrices))
+    sign_based_error *= gradient_mask
+    # Normalizing: we always average over the last dimension (which is an artificial appended minibatch dim),
+    #   and over the actual minibatch dim which is dim 1 (after transposition).
+    return loss_factor * sign_based_error.mean()
+

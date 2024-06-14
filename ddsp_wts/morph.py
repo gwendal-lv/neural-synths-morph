@@ -89,7 +89,7 @@ def morph(model_dir: Path, dataset_dir: Path, n_steps=9, device='cuda:0'):
 
 if __name__ == "__main__":
     morph(
-        Path("/media/gwendal/Data/Logs/neural-synths-morph/final/ddsp_wt_20wt5pureharm"),
+        Path("/media/gwendal/Data/Logs/neural-synths-morph/DDSPdev2/ddsp_hm_12AR_gamma0.1_droplast"),
         Path("/media/gwendal/Data/Datasets/Dexed_split/test/"),
         9
     )

@@ -14,7 +14,7 @@ from tensorboardX import SummaryWriter
 import soundfile as sf
 
 from dataloader import get_data_loader
-from model import DDSP_WTS, MSS_loss, config_to_model_kwargs
+from model import DDSP_WTS, MSS_loss, AR_latent_loss, config_to_model_kwargs
 import plots
 
 
@@ -39,7 +39,7 @@ def train_model(config):
     model.to(device)
 
     # full batches only? maybe not be required if batch norm is not used (seems to be layer norm only)
-    train_dl = get_data_loader(config, mode="train", batch_size=batch_size)
+    train_dl = get_data_loader(config, mode="train", batch_size=batch_size, drop_last=True)
     valid_dl = get_data_loader(config, mode="valid", batch_size=batch_size, shuffle=False)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config["train"]["start_lr"])
@@ -64,21 +64,25 @@ def train_model(config):
     with open(log_dir.joinpath('config.yaml'), 'w') as f:
         yaml.dump(config, f)
     step_index = 0
-    for epoch in tqdm(range(1, epochs + 1)):
-        for audio_target, loudness, pitch in train_dl:
-            audio_target, loudness, pitch = audio_target.to(device), loudness.to(device), pitch.to(device)
+    for epoch in tqdm(range(1, epochs + 1), desc='Epoch', leave=False, position=0):
+        for batch in tqdm(train_dl, desc="Minibatch", leave=False, position=1):
+            audio_target, loudness, pitch, timbre = (item.to(device) for item in batch)
             mfcc = model.compute_MFCC(audio_target)
             audio_output, Z = model(mfcc, pitch, loudness)
 
-            loss = MSS_loss(audio_output, audio_target, scales, overlap, add_log_loss)
-            train_logger.add_scalar(f"MSSloss/{config['train']['loss']}", loss.item(), global_step=step_index)
+            loss_mss = MSS_loss(audio_output, audio_target, scales, overlap, add_log_loss)
+            loss_AR = AR_latent_loss(Z, timbre)
+            loss_total = loss_mss + loss_AR
+            train_logger.add_scalar(f"MSSloss/{config['train']['loss']}", loss_mss.item(), global_step=step_index)
+            train_logger.add_scalar("ARloss", loss_AR.item(), global_step=step_index)
+            train_logger.add_scalar("TotalLoss", loss_total.item(), global_step=step_index)
 
-            # TODO try implement extra wavetable loss: minimize cross-correlation because the wavetables
+            # TODO try implement extra wavetable loss: minimize cross-correlation because the wavetables?
             #   (otherwise, multiple waveforms tend to become the same).
             # Risk is that wavetables degenerate to low-correlation noise...
 
             optimizer.zero_grad()
-            loss.backward()
+            loss_total.backward()
             optimizer.step()
 
             step_index += 1
@@ -91,17 +95,23 @@ def train_model(config):
         # - - - Validation (at each epoch) - - -
         with torch.no_grad():
             valid_audio_target, valid_audio_output = None, None
-            losses = list()
-            for audio_target, loudness, pitch in valid_dl:
-                audio_target, loudness, pitch = audio_target.to(device), loudness.to(device), pitch.to(device)
+            losses = {f"MSSloss/{config['train']['loss']}": list(), "ARloss": list(), 'TotalLoss': list()}
+            for batch in valid_dl:
+                audio_target, loudness, pitch, timbre = (item.to(device) for item in batch)
                 mfcc = model.compute_MFCC(audio_target)
                 audio_output, Z = model(mfcc, pitch, loudness)
-                losses.append(MSS_loss(audio_output, audio_target, scales, overlap, add_log_loss).item())
+                loss_mss = MSS_loss(audio_output, audio_target, scales, overlap, add_log_loss).item()
+                loss_AR = AR_latent_loss(Z, timbre).item()
+                loss_total = loss_mss + loss_AR
+                losses[f"MSSloss/{config['train']['loss']}"].append(loss_mss)
+                losses['ARloss'].append(loss_AR)
+                losses['TotalLoss'].append(loss_total)
                 # Backup of the first minibatch only; may be plotted/saved just after this
                 if valid_audio_target is None:
                     valid_audio_target = audio_target.cpu().numpy()
                     valid_audio_output = audio_output.cpu().squeeze(dim=2).numpy()
-            valid_logger.add_scalar(f"MSSloss/{config['train']['loss']}", np.mean(losses), global_step=step_index)
+            for k, l_array in losses.items():
+                valid_logger.add_scalar(k, np.mean(l_array), global_step=step_index)
 
             # - - - plots (pas à toutes les epochs) and save the model - - -
             if epoch % config['train']['plot_period_epochs'] == 0:  # Epoch starts at 1 (not 0)
