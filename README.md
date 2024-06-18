@@ -5,6 +5,7 @@ PyTorch code for neural synths has been adapted from the following repositories:
 - DDSP: https://github.com/acids-ircam/ddsp_pytorch
 - DiffWave: https://github.com/gudgud96/diff-wave-synth
 - RAVE: https://github.com/acids-ircam/RAVE
+- Latent Timbre Synthesis: https://github.com/ktatar/latent-timbre-synthesis-pytorch
 
 # Setup 
 

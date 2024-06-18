@@ -12,7 +12,8 @@ from tqdm import tqdm
 
 import ltsp.model
 
-# TODO time measurements also here
+
+
 def morph(n_steps=9, device='cpu'):
     torch.set_grad_enabled(False)
 

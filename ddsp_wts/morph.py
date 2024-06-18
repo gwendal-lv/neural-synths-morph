@@ -15,7 +15,7 @@ import soundfile as sf
 
 from model import DDSP_WTS, config_to_model_kwargs
 
-def morph(model_dir: Path, dataset_dir: Path, n_steps=9, device='cuda:0'):
+def morph(model_dir: Path, dataset_dir: Path, n_steps=9, device='cuda:0', z_morph_only=False):
     """
 
     :param model_dir: Model directory with the config.yaml files and model weights.
@@ -80,6 +80,8 @@ def morph(model_dir: Path, dataset_dir: Path, n_steps=9, device='cuda:0'):
 
         # Save results
         for interp_method, audio_interp in zip(("MFCC", "Z"), (audio_interp_MFCC, audio_interp_Z)):
+            if z_morph_only and interp_method != 'Z':
+                continue
             audio = torch.cat((audio_out_start_end[0:1, ...], audio_interp, audio_out_start_end[1:2, ...]), dim=0)
             seq_dir = morph_save_dirs[interp_method].joinpath(f'{seq_idx:05d}')
             seq_dir.mkdir(parents=False, exist_ok=False)
@@ -89,8 +91,9 @@ def morph(model_dir: Path, dataset_dir: Path, n_steps=9, device='cuda:0'):
 
 if __name__ == "__main__":
     morph(
-        Path("/media/gwendal/Data/Logs/neural-synths-morph/DDSPdev2/ddsp_hm_12AR_gamma0.1_droplast"),
+        Path("/media/gwendal/Data/Logs/neural-synths-morph/DDSPdev2/ddsp_hm_DZ32batch32_26ARg0.5"),
         Path("/media/gwendal/Data/Datasets/Dexed_split/test/"),
-        9
+        9,
+        z_morph_only=True
     )
 
