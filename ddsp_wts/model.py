@@ -46,11 +46,16 @@ class Reverb(nn.Module):
 
 
 def config_to_model_kwargs(config):
+    # Compatibility parameters: if a key is missing, use the default value
+    if 'latent_size' not in config['model'].keys():
+        config['model']['latent_size'] = 16
+
     return {
         'hidden_size': config["model"]["hidden_size"], 'n_harmonic': config["model"]["n_harmonic"],
         'n_bands': config["model"]["n_bands"],
         'sampling_rate': config["common"]["sampling_rate"], 'block_size': config["common"]["block_size"],
         'n_wavetables': config["model"]["n_wavetables"], 'n_wt_pure_harmonics': config['model']['n_wt_pure_harmonics'],
+        'latent_size': config['model']['latent_size'],
         'mode': config["model"]["synth_mode"], 'duration_secs': config["common"]["duration_secs"],
         'n_mfcc': config["model"]["n_mfcc"], 'upsampling_mode': config["model"]["upsampling_mode"]
     }
@@ -60,10 +65,12 @@ class DDSP_WTS(nn.Module):
     def __init__(self, hidden_size, n_harmonic, n_bands, sampling_rate,
                  block_size,
                  n_wavetables, n_wt_pure_harmonics=0,
-                 mode="wavetable", duration_secs=3,
+                 latent_size=16,
+                 mode="harmonic", duration_secs=3,
                  n_mfcc=30, use_reverb=False, upsampling_mode="nearest"):
         super().__init__()
-        self.hidden_size, self.synth_mode, self.duration_secs, self.n_mfcc = hidden_size, mode, duration_secs, n_mfcc
+        self.synth_mode, self.duration_secs, self.n_mfcc = mode, duration_secs, n_mfcc
+        self.hidden_size, self.D_Z = hidden_size, latent_size  # Size of a hidden and latent vector (time slice)
         self.upsampling_mode = upsampling_mode  # Use to upsample pitches, loudness and partial's amplitudes
         assert self.synth_mode in ["harmonic", "wavetable"]
         # Parameters that can be saved and restored, but not trained
@@ -72,18 +79,18 @@ class DDSP_WTS(nn.Module):
         self.register_buffer("block_size", torch.tensor(block_size))
 
         # Pre-processing
-        self.mean_loudness, self.std_loudness = -39.74668743704927, 54.19612404969509  # NSynth train set
-        #self.mean_loudness, self.std_loudness = -28.654367014678332, 59.86895554249753  # TODO USE Dexed train set
+        #self.mean_loudness, self.std_loudness = -39.74668743704927, 54.19612404969509  # NSynth train set
+        self.mean_loudness, self.std_loudness = -28.654367014678332, 59.86895554249753  # TODO USE Dexed train set
         self.compute_MFCC = nnAudio.features.mel.MFCC(sr=sampling_rate, n_mfcc=n_mfcc)
 
         # Original DDSP: "normalization layer with learnable shift and scale parameters"
         self.layer_norm = nn.LayerNorm(self.n_mfcc)
         self.gru_mfcc = nn.GRU(self.n_mfcc, self.hidden_size, batch_first=True)
-        self.mlp_mfcc = nn.Linear(self.hidden_size, 16)  # 16 (latent variables per frame) = size of a z(t)
+        self.mlp_mfcc = nn.Linear(self.hidden_size, self.D_Z)  # D_Z (latent variables per frame) = size of a z(t)
 
         self.decoder_in_mlps = nn.ModuleList([mlp(1, self.hidden_size, 3),
                                               mlp(1, self.hidden_size, 3),
-                                              mlp(16, self.hidden_size, 3)])
+                                              mlp(self.D_Z, self.hidden_size, 3)])
         self.decoder_gru = gru(3, self.hidden_size)  # TODO use raw GRU... not that method
         self.out_mlp = mlp(self.hidden_size * 4, self.hidden_size, 3)  # 4 tokens after the skip-connection
 
@@ -120,7 +127,7 @@ class DDSP_WTS(nn.Module):
             assert mfcc is None, "Either MFCC or optional Z should be provided."
         # use image resize to align dimensions, ddsp also do this... TODO CHECK this: seems OK but can't find the source
         # FIXME use a variable factor for resize ; 100 only works with the default config 16kHz block 160
-        Z_resampled = Resize(size=(self.duration_secs * 100, 16))(Z)  # After this: Z shape is N x L_frames x 16
+        Z_resampled = Resize(size=(self.duration_secs * 100, self.D_Z))(Z)  # After this: Z shape is N x L_frames x 16
 
         # - - - Decoder - - -
         pitch_hidden = self.decoder_in_mlps[0](pitch)

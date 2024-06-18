@@ -5,8 +5,10 @@ dataset:
   audio: "audio/"
   pitch: "pitch/"
   loudness: "loudness/"
-  timbre: "timbre/"  # TODO set to empty before commit
-  timbre_features: 'ac_hardness;ac_warmth;tt_SpecCrest_med;tt_SpecCrest_IQR;tt_SpecRollOff_med;tt_SpecRollOff_IQR;tt_SpecFlat_med;tt_SpecFlat_IQR;tt_SpecVar_med;tt_SpecVar_IQR;tt_OddEvenRatio_med;tt_OddEvenRatio_IQR'
+  timbre: "timbre/"  # Leave empty to disable latent timbre regularization TODO set to empty before commit
+  #timbre_features: ""
+  #timbre_features: 'ac_hardness;ac_warmth;tt_SpecCrest_med;tt_SpecCrest_IQR;tt_SpecRollOff_med;tt_SpecRollOff_IQR;tt_SpecFlat_med;tt_SpecFlat_IQR;tt_SpecVar_med;tt_SpecVar_IQR;tt_OddEvenRatio_med;tt_OddEvenRatio_IQR'
+  timbre_features: 'ac_hardness;ac_depth;ac_brightness;ac_roughness;ac_warmth;ac_boominess;tt_SpecCent_IQR;tt_SpecCrest_med;tt_SpecCrest_IQR;tt_SpecDecr_med;tt_SpecDecr_IQR;tt_SpecFlat_med;tt_SpecFlat_IQR;tt_SpecKurt_med;tt_SpecKurt_IQR;tt_SpecRollOff_med;tt_SpecRollOff_IQR;tt_SpecSpread_med;tt_SpecSpread_IQR;tt_SpecVar_med;tt_SpecVar_IQR;tt_HarmErg_IQR;tt_InHarm_med;tt_InHarm_IQR;tt_OddEvenRatio_med;tt_OddEvenRatio_IQR'
 
 common:
   sampling_rate: 16000
@@ -14,10 +16,11 @@ common:
   duration_secs: 4
 
 model:
-  name: "12AR_gamma0.5"
+  name: "DZ32batch32_26ARg0.5"
   synth_mode: "harmonic"  # harmonic or wavetable
   n_mfcc: 30
   hidden_size: 512
+  latent_size: 32  # Original DDSP paper: 16
   n_harmonic: 100
   n_bands: 65
   n_wavetables: 20
@@ -27,12 +30,12 @@ model:
 
 train:
   root_logs_dir: "/media/gwendal/Data/Logs/neural-synths-morph/DDSPdev2"
-  batch_size: 48
+  batch_size: 32
   scales: [4096, 2048, 1024, 512, 256, 128]
   overlap: .75
   loss: 'lin+log'  # Only linear MSS loss (lin), or linear+logarithmic (lin+log)
-  start_lr: 0.0015
-  stop_lr: 0.00015
+  start_lr: 0.001
+  stop_lr: 0.0001
   epochs: 100
   plot_period_epochs: 5
 

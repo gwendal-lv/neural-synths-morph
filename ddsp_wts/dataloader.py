@@ -23,7 +23,7 @@ class AudioDataset(Dataset):
         self.audio_path = config["dataset"]["audio"]
         self.pitch_path = config["dataset"]["pitch"]
         self.loudness_path = config["dataset"]["loudness"]
-        if config["dataset"]["timbre"] is not None:
+        if config["dataset"]["timbre"] is not None and config["dataset"]["timbre"] != "":
             self.timbre_dir = self.root_dir / config["dataset"]["timbre"]
             with open(self.root_dir / 'normalized_timbre_features_names.json', 'r') as f:
                 available_timbre_features = list(json.load(f))
@@ -34,6 +34,8 @@ class AudioDataset(Dataset):
                 assert f_name in available_timbre_features
                 idx = available_timbre_features.index(f_name)
                 self.timbre_features_bool_mask[idx] = True
+            print(f"[AudioDataset {tr_val}] {torch.count_nonzero(self.timbre_features_bool_mask).item()} "
+                  f"timbre features used")
         else:
             self.timbre_dir, self.timbre_features_bool_mask = None, None
 
